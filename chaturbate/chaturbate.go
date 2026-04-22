@@ -416,14 +416,23 @@ func PickPlaylist(masterPlaylist *m3u8.MasterPlaylist, baseURL string, resolutio
 		resolutions[width].Framerate[framerateVal] = v.URI
 	}
 
+	// Always select the highest available quality
+	// First, try to find the exact requested resolution
 	variant, exists := resolutions[resolution]
 	if !exists {
-		candidates := lo.Filter(lo.Values(resolutions), func(r *VideoResolution, _ int) bool {
-			return r.Width < resolution
-		})
-		variant = lo.MaxBy(candidates, func(a, b *VideoResolution) bool {
+		// If exact resolution not found, select the highest available quality
+		// This ensures 4K streams are recorded at 4K even if config requests 1080p
+		allResolutions := lo.Values(resolutions)
+		if len(allResolutions) == 0 {
+			return nil, fmt.Errorf("no resolutions available")
+		}
+		variant = lo.MaxBy(allResolutions, func(a, b *VideoResolution) bool {
 			return a.Width > b.Width
 		})
+		if server.Config.Debug {
+			fmt.Printf("[DEBUG] Requested resolution %dp not available, using highest quality: %dp\n", 
+				resolution, variant.Width)
+		}
 	}
 	if variant == nil {
 		return nil, fmt.Errorf("resolution not found")
@@ -435,10 +444,19 @@ func PickPlaylist(masterPlaylist *m3u8.MasterPlaylist, baseURL string, resolutio
 	)
 	playlistURL, exists := variant.Framerate[framerate]
 	if !exists {
+		// If requested framerate not available, select the highest available framerate
+		// This ensures 60fps streams are recorded at 60fps even if config requests 30fps
+		maxFPS := 0
 		for fr, u := range variant.Framerate {
-			playlistURL = u
-			finalFramerate = fr
-			break
+			if fr > maxFPS {
+				maxFPS = fr
+				playlistURL = u
+				finalFramerate = fr
+			}
+		}
+		if server.Config.Debug && maxFPS > 0 {
+			fmt.Printf("[DEBUG] Requested framerate %dfps not available, using highest: %dfps\n", 
+				framerate, finalFramerate)
 		}
 	}
 

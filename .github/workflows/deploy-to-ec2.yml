@@ -66,14 +66,15 @@ jobs:
           
           # Backup current deployment
           if [ -d "${{ env.APP_DIR }}/backup" ]; then
-            rm -rf ${{ env.APP_DIR }}/backup
+            sudo rm -rf ${{ env.APP_DIR }}/backup
           fi
           
           if [ -d "${{ env.APP_DIR }}/conf" ]; then
             echo "📦 Backing up configuration..."
             mkdir -p ${{ env.APP_DIR }}/backup
-            cp -r ${{ env.APP_DIR }}/conf ${{ env.APP_DIR }}/backup/
-            cp -r ${{ env.APP_DIR }}/database ${{ env.APP_DIR }}/backup/ 2>/dev/null || true
+            sudo cp -r ${{ env.APP_DIR }}/conf ${{ env.APP_DIR }}/backup/
+            sudo cp -r ${{ env.APP_DIR }}/database ${{ env.APP_DIR }}/backup/ 2>/dev/null || true
+            sudo chown -R ubuntu:ubuntu ${{ env.APP_DIR }}/backup
           fi
           
           # Extract new code
@@ -85,8 +86,10 @@ jobs:
           # Restore configuration if backed up
           if [ -d "${{ env.APP_DIR }}/backup/conf" ]; then
             echo "♻️  Restoring configuration..."
-            cp -r ${{ env.APP_DIR }}/backup/conf ${{ env.APP_DIR }}/
-            cp -r ${{ env.APP_DIR }}/backup/database ${{ env.APP_DIR }}/ 2>/dev/null || true
+            sudo cp -r ${{ env.APP_DIR }}/backup/conf ${{ env.APP_DIR }}/
+            sudo cp -r ${{ env.APP_DIR }}/backup/database ${{ env.APP_DIR }}/ 2>/dev/null || true
+            sudo chown -R ubuntu:ubuntu ${{ env.APP_DIR }}/conf
+            sudo chown -R ubuntu:ubuntu ${{ env.APP_DIR }}/database 2>/dev/null || true
           fi
           
           # Ensure directories exist

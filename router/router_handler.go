@@ -1,6 +1,7 @@
 package router
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -238,35 +239,175 @@ func UpdateConfig(c *gin.Context) {
 
 // GetVideos returns all uploaded video records as JSON
 func GetVideos(c *gin.Context) {
-	if !server.Config.EnableSupabase || server.Config.SupabaseURL == "" || server.Config.SupabaseAPIKey == "" {
-		c.JSON(http.StatusOK, gin.H{"error": "Supabase is disabled", "videos": []interface{}{}})
-		return
+	var allRecords []map[string]interface{}
+	
+	// Try Supabase first if enabled
+	if server.Config.EnableSupabase && server.Config.SupabaseURL != "" && server.Config.SupabaseAPIKey != "" {
+		records, err := server.SupabaseClient.GetAllUploads()
+		if err == nil {
+			// Convert to generic map format
+			for _, record := range records {
+				allRecords = append(allRecords, map[string]interface{}{
+					"id":                record.ID,
+					"streamer_name":     record.StreamerName,
+					"filename":          record.Filename,
+					"gofile_link":       record.GofileLink,
+					"turboviplay_link":  record.TurboViPlayLink,
+					"voesx_link":        record.VoeSXLink,
+					"streamtape_link":   record.StreamtapeLink,
+					"thumbnail_link":    record.ThumbnailLink,
+					"upload_date":       record.UploadDate,
+					"source":            "supabase",
+				})
+			}
+		}
 	}
+	
+	// Also read from local JSON database
+	localRecords := readLocalDatabase()
+	allRecords = append(allRecords, localRecords...)
+	
+	c.JSON(http.StatusOK, gin.H{"videos": allRecords, "count": len(allRecords)})
+}
 
-	records, err := server.SupabaseClient.GetAllUploads()
+// readLocalDatabase reads video records from the local JSON database
+func readLocalDatabase() []map[string]interface{} {
+	var allRecords []map[string]interface{}
+	
+	// Walk through database directory
+	databaseDir := "database"
+	if _, err := os.Stat(databaseDir); os.IsNotExist(err) {
+		return allRecords
+	}
+	
+	err := filepath.Walk(databaseDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil // Skip errors
+		}
+		
+		// Only process recordings.json files
+		if info.IsDir() || filepath.Base(path) != "recordings.json" {
+			return nil
+		}
+		
+		// Read the JSON file
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+		
+		var dbData map[string]interface{}
+		if err := json.Unmarshal(data, &dbData); err != nil {
+			return nil
+		}
+		
+		// Extract recordings array
+		recordings, ok := dbData["recordings"].([]interface{})
+		if !ok {
+			return nil
+		}
+		
+		// Add each recording to the result
+		for _, rec := range recordings {
+			if recMap, ok := rec.(map[string]interface{}); ok {
+				recMap["source"] = "local"
+				allRecords = append(allRecords, recMap)
+			}
+		}
+		
+		return nil
+	})
+	
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error(), "videos": []interface{}{}})
-		return
+		log.Printf("Error reading local database: %v", err)
 	}
-
-	c.JSON(http.StatusOK, gin.H{"videos": records, "count": len(records)})
+	
+	return allRecords
 }
 
 // GetVideosByUsername returns all uploaded video records for a specific username
 func GetVideosByUsername(c *gin.Context) {
-	if !server.Config.EnableSupabase || server.Config.SupabaseURL == "" || server.Config.SupabaseAPIKey == "" {
-		c.JSON(http.StatusOK, gin.H{"error": "Supabase is disabled", "videos": []interface{}{}})
-		return
-	}
-
 	username := c.Param("username")
-	records, err := server.SupabaseClient.GetUploadsByStreamer(username)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error(), "videos": []interface{}{}})
-		return
+	var allRecords []map[string]interface{}
+	
+	// Try Supabase first if enabled
+	if server.Config.EnableSupabase && server.Config.SupabaseURL != "" && server.Config.SupabaseAPIKey != "" {
+		records, err := server.SupabaseClient.GetUploadsByStreamer(username)
+		if err == nil {
+			// Convert to generic map format
+			for _, record := range records {
+				allRecords = append(allRecords, map[string]interface{}{
+					"id":                record.ID,
+					"streamer_name":     record.StreamerName,
+					"filename":          record.Filename,
+					"gofile_link":       record.GofileLink,
+					"turboviplay_link":  record.TurboViPlayLink,
+					"voesx_link":        record.VoeSXLink,
+					"streamtape_link":   record.StreamtapeLink,
+					"thumbnail_link":    record.ThumbnailLink,
+					"upload_date":       record.UploadDate,
+					"source":            "supabase",
+				})
+			}
+		}
 	}
+	
+	// Also read from local JSON database
+	localRecords := readLocalDatabaseByUsername(username)
+	allRecords = append(allRecords, localRecords...)
+	
+	c.JSON(http.StatusOK, gin.H{"videos": allRecords, "count": len(allRecords), "username": username})
+}
 
-	c.JSON(http.StatusOK, gin.H{"videos": records, "count": len(records), "username": username})
+// readLocalDatabaseByUsername reads video records for a specific username from the local JSON database
+func readLocalDatabaseByUsername(username string) []map[string]interface{} {
+	var allRecords []map[string]interface{}
+	
+	// Check if user directory exists
+	userDir := filepath.Join("database", username)
+	if _, err := os.Stat(userDir); os.IsNotExist(err) {
+		return allRecords
+	}
+	
+	err := filepath.Walk(userDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		
+		if info.IsDir() || filepath.Base(path) != "recordings.json" {
+			return nil
+		}
+		
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+		
+		var dbData map[string]interface{}
+		if err := json.Unmarshal(data, &dbData); err != nil {
+			return nil
+		}
+		
+		recordings, ok := dbData["recordings"].([]interface{})
+		if !ok {
+			return nil
+		}
+		
+		for _, rec := range recordings {
+			if recMap, ok := rec.(map[string]interface{}); ok {
+				recMap["source"] = "local"
+				allRecords = append(allRecords, recMap)
+			}
+		}
+		
+		return nil
+	})
+	
+	if err != nil {
+		log.Printf("Error reading local database for %s: %v", username, err)
+	}
+	
+	return allRecords
 }
 
 // GetVideosBySite returns all uploaded video records for a specific site

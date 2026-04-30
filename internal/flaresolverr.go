@@ -18,24 +18,16 @@ import (
 // Global counter for round-robin load balancing across FlareSolverr instances
 var flaresolverrCounter uint64
 
-// getFlareSolverrURL returns a FlareSolverr URL using round-robin load balancing
-// Supports multiple instances: flaresolverr-1:8191, flaresolverr-2:8191, etc.
+// getFlareSolverrURL returns the FlareSolverr/Byparr URL
+// Supports both load-balanced (byparr-lb) and direct instances
 func getFlareSolverrURL() string {
 	baseURL := os.Getenv("FLARESOLVERR_URL")
 	if baseURL == "" {
 		baseURL = "http://localhost:8191/v1"
 	}
 	
-	// Check if we have multiple instances configured
-	// If FLARESOLVERR_URL contains "flaresolverr-1", we assume instances 1-5 exist
-	if strings.Contains(baseURL, "flaresolverr-1") {
-		// Round-robin across 5 instances
-		instanceNum := (atomic.AddUint64(&flaresolverrCounter, 1) % 5) + 1
-		url := strings.Replace(baseURL, "flaresolverr-1", fmt.Sprintf("flaresolverr-%d", instanceNum), 1)
-		if server.Config.Debug {
-			fmt.Printf("[DEBUG] Using FlareSolverr instance %d: %s\n", instanceNum, url)
-		}
-		return url
+	if server.Config.Debug {
+		fmt.Printf("[DEBUG] Using Byparr URL: %s\n", baseURL)
 	}
 	
 	return baseURL
@@ -116,6 +108,37 @@ func GetFreshCookies(ctx context.Context, url string) (string, string, error) {
 		MaxTimeout: 180000, // 180 seconds for Cloudflare challenges
 		Session:    sessionID,
 	}
+	
+	// Add proxy configuration if available
+	proxyURL := os.Getenv("PROXY_URL")
+	proxyUsername := os.Getenv("PROXY_USERNAME")
+	proxyPassword := os.Getenv("PROXY_PASSWORD")
+	
+	// Only set proxy if URL is provided and not empty
+	if proxyURL != "" {
+		reqBody.Proxy.URL = proxyURL
+		if proxyUsername != "" {
+			// FlareSolverr doesn't support username/password in proxy struct
+			// We need to embed credentials in the URL
+			// Format: http://username:password@proxy.com:port
+			if proxyPassword != "" && !strings.Contains(proxyURL, "@") {
+				// Parse the URL to inject credentials
+				if strings.HasPrefix(proxyURL, "http://") {
+					reqBody.Proxy.URL = strings.Replace(proxyURL, "http://", fmt.Sprintf("http://%s:%s@", proxyUsername, proxyPassword), 1)
+				} else if strings.HasPrefix(proxyURL, "https://") {
+					reqBody.Proxy.URL = strings.Replace(proxyURL, "https://", fmt.Sprintf("https://%s:%s@", proxyUsername, proxyPassword), 1)
+				}
+			}
+		}
+		if server.Config.Debug {
+			// Don't log password
+			safeURL := reqBody.Proxy.URL
+			if proxyPassword != "" {
+				safeURL = strings.Replace(safeURL, proxyPassword, "***", -1)
+			}
+			fmt.Printf("[DEBUG] FlareSolverr: using proxy %s\n", safeURL)
+		}
+	}
 
 	jsonData, err = json.Marshal(reqBody)
 	if err != nil {
@@ -163,7 +186,15 @@ func GetFreshCookies(ctx context.Context, url string) (string, string, error) {
 	}()
 
 	if fsResp.Status != "ok" {
-		return "", "", fmt.Errorf("flaresolverr error: %s", fsResp.Message)
+		// Check for specific error patterns
+		errMsg := fsResp.Message
+		if strings.Contains(errMsg, "%d format") || strings.Contains(errMsg, "NoneType") {
+			return "", "", fmt.Errorf("flaresolverr challenge failed (likely needs residential proxy): %s", errMsg)
+		}
+		if strings.Contains(errMsg, "timeout") || strings.Contains(errMsg, "timed out") {
+			return "", "", fmt.Errorf("flaresolverr timeout (cloudflare challenge too complex): %s", errMsg)
+		}
+		return "", "", fmt.Errorf("flaresolverr error: %s", errMsg)
 	}
 
 	// Extract cookies

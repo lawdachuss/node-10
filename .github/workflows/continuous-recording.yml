@@ -36,9 +36,23 @@ jobs:
       
       - name: Create settings.json from secrets
         run: |
-          cat > settings.json << 'EOF'
+          echo "📋 Creating settings.json..."
+          if [ -n "${{ secrets.SETTINGS_JSON }}" ]; then
+            cat > settings.json << 'EOF'
           ${{ secrets.SETTINGS_JSON }}
           EOF
+            echo "✅ settings.json created from secret"
+          else
+            echo "❌ SETTINGS_JSON secret not found!"
+            echo ""
+            echo "Please add SETTINGS_JSON secret in GitHub repository settings:"
+            echo "1. Go to: https://github.com/${{ github.repository }}/settings/secrets/actions"
+            echo "2. Click 'New repository secret'"
+            echo "3. Name: SETTINGS_JSON"
+            echo "4. Value: Copy your entire settings.json content"
+            echo ""
+            exit 1
+          fi
       
       - name: Create channels.json from secrets (if exists)
         run: |
@@ -47,13 +61,13 @@ jobs:
             cat > conf/channels.json << 'EOF'
           ${{ secrets.CHANNELS_JSON }}
           EOF
-            echo "✅ channels.json created"
+            echo "✅ channels.json created from secret"
             echo "📊 Channel count: $(jq '. | length' conf/channels.json)"
             echo "📺 Active channels: $(jq '[.[] | select(.is_paused == false)] | length' conf/channels.json)"
           else
-            echo "⚠️ CHANNELS_JSON secret not found!"
-            echo "Please add CHANNELS_JSON secret in GitHub repository settings"
-            exit 1
+            echo "⚠️ CHANNELS_JSON secret not found"
+            echo "Creating empty channels file - you can add channels via Web UI"
+            echo "[]" > conf/channels.json
           fi
       
       - name: Set up Docker Buildx

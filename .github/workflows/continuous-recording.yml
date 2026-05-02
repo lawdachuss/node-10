@@ -176,34 +176,81 @@ jobs:
           
           # Show what we have
           echo "📋 Checking files:"
-          ls -la settings.json conf/channels.json 2>/dev/null || echo "Some files missing"
+          ls -la settings.json 2>/dev/null && echo "✅ settings.json exists" || echo "❌ settings.json missing"
+          ls -la conf/channels.json 2>/dev/null && echo "✅ channels.json exists" || echo "❌ channels.json missing"
           
-          docker run -d \
-            --name goondvr \
-            --network recorder-network \
-            -p 8080:8080 \
-            -e FLARESOLVERR_URL=http://byparr:8191/v1 \
-            -v $(pwd)/videos:/usr/src/app/videos \
-            -v $(pwd)/database:/usr/src/app/database \
-            -v $(pwd)/conf:/usr/src/app/conf \
-            -v $(pwd)/settings.json:/usr/src/app/settings.json \
-            goondvr:latest --port 8080 --enable-gofile-upload --debug
+          # Show file contents (first few lines)
+          echo ""
+          echo "📄 settings.json preview:"
+          head -5 settings.json 2>/dev/null || echo "Cannot read settings.json"
+          echo ""
+          echo "📄 channels.json preview:"
+          head -5 conf/channels.json 2>/dev/null || echo "Cannot read channels.json"
+          echo ""
+          
+          # Check if Byparr is available
+          BYPARR_URL=""
+          if docker ps 2>/dev/null | grep -q byparr; then
+            BYPARR_URL="http://byparr:8191/v1"
+            echo "✅ Byparr is available, will use it for Cloudflare bypass"
+          else
+            echo "⚠️ Byparr not available, will use cookies only"
+          fi
+          
+          # Start the container
+          echo ""
+          echo "🐳 Starting goondvr container..."
+          
+          if [ -n "$BYPARR_URL" ]; then
+            docker run -d \
+              --name goondvr \
+              --network recorder-network \
+              -p 8080:8080 \
+              -e FLARESOLVERR_URL="$BYPARR_URL" \
+              -v $(pwd)/videos:/usr/src/app/videos \
+              -v $(pwd)/database:/usr/src/app/database \
+              -v $(pwd)/conf:/usr/src/app/conf \
+              -v $(pwd)/settings.json:/usr/src/app/settings.json \
+              goondvr:latest --port 8080 --enable-gofile-upload --debug
+          else
+            docker run -d \
+              --name goondvr \
+              --network recorder-network \
+              -p 8080:8080 \
+              -v $(pwd)/videos:/usr/src/app/videos \
+              -v $(pwd)/database:/usr/src/app/database \
+              -v $(pwd)/conf:/usr/src/app/conf \
+              -v $(pwd)/settings.json:/usr/src/app/settings.json \
+              goondvr:latest --port 8080 --enable-gofile-upload --debug
+          fi
           
           # Wait for container to start
-          sleep 5
+          echo "⏳ Waiting for container to initialize..."
+          sleep 10
           
           # Check if container is running
           if docker ps | grep -q goondvr; then
             echo "✅ Docker container started successfully"
             echo ""
-            echo "📋 Container logs:"
-            docker logs goondvr
+            echo "📋 Initial container logs:"
+            docker logs goondvr 2>&1 | head -50
             echo ""
-            echo "📁 Files in container:"
-            docker exec goondvr ls -la /usr/src/app/conf/ || echo "Could not list conf directory"
+            echo "📁 Files in container conf directory:"
+            docker exec goondvr ls -la /usr/src/app/conf/ 2>/dev/null || echo "Could not list conf directory"
+            echo ""
+            echo "📁 Files in container root:"
+            docker exec goondvr ls -la /usr/src/app/ 2>/dev/null | grep -E "(settings|conf)" || echo "Could not list root directory"
           else
-            echo "❌ Docker container failed to start"
-            docker logs goondvr
+            echo "❌ Docker container failed to start or stopped immediately"
+            echo ""
+            echo "📋 Full container logs:"
+            docker logs goondvr 2>&1 || echo "No logs available"
+            echo ""
+            echo "🔍 Container status:"
+            docker ps -a | grep goondvr || echo "Container not found"
+            echo ""
+            echo "🔍 Inspecting container:"
+            docker inspect goondvr 2>&1 | grep -A 10 "State" || echo "Cannot inspect"
             exit 1
           fi
       

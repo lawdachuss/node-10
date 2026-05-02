@@ -77,13 +77,35 @@ jobs:
         continue-on-error: true
         run: |
           echo "🔧 Starting Byparr for Cloudflare bypass..."
-          echo "ℹ️  Note: Byparr is optional if you have fresh cookies in settings.json"
-          echo ""
           
           # Create docker network
-          docker network create recorder-network 2>/dev/null || echo "Network already exists"
+          docker network create recorder-network 2>/dev/null || echo "✅ Network already exists"
           
-          # Start Byparr with more resources
+          # Pull the image first
+          echo "📥 Pulling Byparr image..."
+          docker pull ghcr.io/thephaseless/byparr:latest || {
+            echo "⚠️ Failed to pull Byparr image"
+            echo "Trying alternative: flaresolverr"
+            docker pull ghcr.io/flaresolverr/flaresolverr:latest || {
+              echo "❌ Could not pull any bypass service"
+              exit 0
+            }
+            
+            # Use FlareSolverr as fallback
+            docker run -d \
+              --name byparr \
+              --network recorder-network \
+              -p 8191:8191 \
+              -e LOG_LEVEL=info \
+              ghcr.io/flaresolverr/flaresolverr:latest
+            
+            echo "✅ Using FlareSolverr as alternative"
+            sleep 15
+            exit 0
+          }
+          
+          # Start Byparr (without strict resource limits for GitHub Actions)
+          echo "🚀 Starting Byparr container..."
           docker run -d \
             --name byparr \
             --network recorder-network \
@@ -92,45 +114,43 @@ jobs:
             -e PORT=8191 \
             -e TIMEOUT=180 \
             -e LOG_LEVEL=INFO \
-            --memory=1g \
-            --cpus=1 \
-            ghcr.io/thephaseless/byparr:latest || {
-              echo "⚠️ Failed to start Byparr container"
-              echo "Trying alternative method..."
-              docker pull ghcr.io/thephaseless/byparr:latest 2>/dev/null || true
-              docker run -d \
-                --name byparr \
-                --network recorder-network \
-                -p 8191:8191 \
-                -e HOST=0.0.0.0 \
-                -e PORT=8191 \
-                ghcr.io/thephaseless/byparr:latest 2>/dev/null || {
-                  echo "⚠️ Byparr unavailable - will use cookies only"
-                  echo "💡 Make sure your cookies in settings.json are fresh!"
-                  exit 0
-                }
-            }
+            ghcr.io/thephaseless/byparr:latest
           
-          echo "⏳ Waiting for Byparr to be ready..."
-          sleep 20
+          echo "⏳ Waiting for Byparr to initialize (30 seconds)..."
+          sleep 30
           
           # Check if Byparr is running
           if docker ps 2>/dev/null | grep -q byparr; then
-            echo "✅ Byparr started successfully"
-            docker logs byparr 2>&1 | tail -10 || true
+            echo "✅ Byparr container is running"
+            echo ""
+            echo "📋 Byparr logs:"
+            docker logs byparr 2>&1 | tail -20 || true
+            echo ""
             
             # Test Byparr endpoint
-            for i in {1..5}; do
-              if curl -s http://localhost:8191/ > /dev/null 2>&1; then
+            echo "🧪 Testing Byparr endpoint..."
+            for i in {1..10}; do
+              if curl -s -f http://localhost:8191/ > /dev/null 2>&1; then
                 echo "✅ Byparr is responding on port 8191"
                 break
               fi
-              echo "⏳ Waiting for Byparr to respond... ($i/5)"
-              sleep 3
+              echo "⏳ Attempt $i/10 - waiting for Byparr to respond..."
+              sleep 5
             done
+            
+            # Final check
+            if curl -s http://localhost:8191/ > /dev/null 2>&1; then
+              echo "✅ Byparr is ready!"
+            else
+              echo "⚠️ Byparr container running but not responding"
+              echo "Will rely on cookies for Cloudflare bypass"
+            fi
           else
-            echo "⚠️ Byparr not running - will rely on cookies for Cloudflare bypass"
-            echo "💡 Ensure your cookies in settings.json are fresh (see docs/GET_FRESH_COOKIES.md)"
+            echo "⚠️ Byparr container not running"
+            echo "📋 Container logs:"
+            docker logs byparr 2>&1 || echo "No logs available"
+            echo ""
+            echo "💡 Will rely on cookies for Cloudflare bypass"
           fi
           echo ""
       

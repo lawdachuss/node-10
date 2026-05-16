@@ -114,20 +114,29 @@ func Updates(c *gin.Context) {
 
 // UpdateConfigRequest represents the request body for updating configuration.
 type UpdateConfigRequest struct {
-	Cookies   string `form:"cookies"`
-	UserAgent string `form:"user_agent"`
+	Cookies   string `json:"cookies" form:"cookies"`
+	UserAgent string `json:"user_agent" form:"user_agent"`
 }
 
-// UpdateConfig updates the server configuration.
+// UpdateConfig updates the server configuration (form from Web UI or JSON from cookie-refresher).
 func UpdateConfig(c *gin.Context) {
-	var req *UpdateConfigRequest
-	if err := c.Bind(&req); err != nil {
+	var req UpdateConfigRequest
+	if err := c.ShouldBind(&req); err != nil {
 		c.AbortWithError(http.StatusBadRequest, fmt.Errorf("bind: %w", err))
 		return
 	}
 
-	server.Config.Cookies = req.Cookies
-	server.Config.UserAgent = req.UserAgent
+	if req.Cookies != "" {
+		server.Config.Cookies = req.Cookies
+	}
+	if req.UserAgent != "" {
+		server.Config.UserAgent = req.UserAgent
+	}
+
+	if c.ContentType() == "application/json" {
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+		return
+	}
 	c.Redirect(http.StatusFound, "/")
 }
 

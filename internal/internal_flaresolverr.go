@@ -227,42 +227,62 @@ func FetchStreamViaFlareSolverr(ctx context.Context, username string) (string, s
                 server.Config.UserAgent = userAgent
         }
 
-        // Step 3: Use the fresh cookies to call the POST API
-        // (Same as direct API call, but now we have valid Cloudflare cookies)
-        // This is more reliable than trying to extract m3u8 URL from HTML
-        csrfToken := fmt.Sprintf("%016x%016x", time.Now().UnixNano(), time.Now().UnixNano()^0xDEADBEEF)
-        
-        body, err := PostChaturbateAPI(ctx, username, csrfToken)
+        // Step 3: POST API with Byparr cookies (csrftoken must match cookie header).
+        body, err := PostChaturbateAPI(ctx, username, "")
         if err != nil {
-                // If POST API still fails after FlareSolverr bypass, room is truly offline/private
                 if strings.Contains(err.Error(), "forbidden") {
-                        return "", "private", nil
+                        return "", "private", fmt.Errorf("post api after byparr: %w", err)
                 }
-                return "", "offline", nil
+                return "", "", fmt.Errorf("post api after byparr: %w", err)
         }
 
-        // Parse POST API response to get HLS URL and room status
-        var resp struct {
-                HLSSource  string `json:"hls_source"`
-                RoomStatus string `json:"room_status"`
+        hlsURL, roomStatus, err := parseStreamAPIBody(body)
+        if err != nil {
+                return "", "", err
         }
+
+        if hlsURL != "" {
+                return hlsURL, roomStatus, nil
+        }
+
+        // Step 4: POST may return public with empty hls_source; try GET chatvideocontext.
+        if roomStatus == "public" {
+                if hlsURL, roomStatus, err = fetchHLSSourceViaGET(ctx, username); err != nil {
+                        return "", "", err
+                }
+                if hlsURL != "" {
+                        return hlsURL, roomStatus, nil
+                }
+        }
+
+        if roomStatus == "" {
+                roomStatus = "offline"
+        }
+        return "", roomStatus, fmt.Errorf("no hls_source after byparr bypass (room_status=%s)", roomStatus)
+}
+
+type streamAPIBody struct {
+        HLSSource  string `json:"hls_source"`
+        RoomStatus string `json:"room_status"`
+}
+
+func parseStreamAPIBody(body string) (hlsURL, roomStatus string, err error) {
+        var resp streamAPIBody
         if err := json.Unmarshal([]byte(body), &resp); err != nil {
-                return "", "offline", fmt.Errorf("failed to parse POST API response: %w", err)
+                return "", "", fmt.Errorf("parse stream API response: %w", err)
         }
+        return resp.HLSSource, resp.RoomStatus, nil
+}
 
-        // Handle room status
-        switch resp.RoomStatus {
-        case "private":
-                return "", "private", nil
-        case "away", "offline":
-                return "", "offline", nil
+func fetchHLSSourceViaGET(ctx context.Context, username string) (hlsURL, roomStatus string, err error) {
+        apiURL := fmt.Sprintf("%sapi/chatvideocontext/%s/", server.Config.Domain, username)
+        body, err := NewReq().Get(ctx, apiURL)
+        if err != nil {
+                return "", "", fmt.Errorf("get chatvideocontext: %w", err)
         }
-
-        // If no HLS source, room is offline
-        if resp.HLSSource == "" {
-                return "", "offline", nil
+        var resp streamAPIBody
+        if err := json.Unmarshal([]byte(body), &resp); err != nil {
+                return "", "", fmt.Errorf("parse chatvideocontext: %w", err)
         }
-
-        // Successfully got HLS URL via FlareSolverr bypass
-        return resp.HLSSource, "public", nil
+        return resp.HLSSource, resp.RoomStatus, nil
 }

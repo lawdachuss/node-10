@@ -85,6 +85,35 @@ func fetchAPIResponse(ctx context.Context, client *internal.Req, username string
         return &resp, nil
 }
 
+// tryFlareSolverrStream uses Byparr/FlareSolverr to obtain cookies and the HLS URL.
+// Used when Cloudflare blocks direct API access or when the room is live but no stream URL is returned.
+func tryFlareSolverrStream(ctx context.Context, username, reason string) (*Stream, string, error) {
+        if os.Getenv("FLARESOLVERR_URL") == "" {
+                return nil, "", fmt.Errorf("FLARESOLVERR_URL not configured")
+        }
+
+        fmt.Printf("[INFO] %s for %s, trying FlareSolverr/Byparr fallback...\n", reason, username)
+
+        attemptCtx, cancel := context.WithTimeout(ctx, 250*time.Second)
+        defer cancel()
+
+        hlsURL, status, scrapeErr := internal.FetchStreamViaFlareSolverr(attemptCtx, username)
+        if scrapeErr != nil {
+                return nil, "", scrapeErr
+        }
+
+        fmt.Printf("[SUCCESS] FlareSolverr/Byparr obtained stream info for %s\n", username)
+
+        if status == "private" {
+                return nil, status, internal.ErrPrivateStream
+        }
+        if status == "offline" || hlsURL == "" {
+                return nil, status, internal.ErrChannelOffline
+        }
+
+        return &Stream{HLSSource: hlsURL}, status, nil
+}
+
 // FetchStream retrieves the streaming data using the Chaturbate API.
 // Returns the stream, the room status string, and any error.
 func FetchStream(ctx context.Context, client *internal.Req, username string) (*Stream, string, error) {
@@ -95,36 +124,16 @@ func FetchStream(ctx context.Context, client *internal.Req, username string) (*S
         if err != nil {
                 // If Cloudflare blocked us, try FlareSolverr as fallback
                 if errors.Is(err, internal.ErrCloudflareBlocked) {
-                        // Check if FLARESOLVERR_URL is configured
-                        flaresolverrURL := os.Getenv("FLARESOLVERR_URL")
-                        if flaresolverrURL != "" {
-                                fmt.Printf("[INFO] Cloudflare blocked POST API for %s, trying FlareSolverr fallback...\n", username)
-                                
-                                // Try FlareSolverr with extended timeout
-                                attemptCtx, cancel := context.WithTimeout(ctx, 250*time.Second)
-                                hlsURL, status, scrapeErr := internal.FetchStreamViaFlareSolverr(attemptCtx, username)
-                                cancel()
-                                
-                                if scrapeErr != nil {
-                                        fmt.Printf("[WARN] FlareSolverr also failed for %s: %v\n", username, scrapeErr)
-                                        return nil, "", fmt.Errorf("both POST API and FlareSolverr blocked: %w", err)
+                        stream, status, fsErr := tryFlareSolverrStream(ctx, username, "Cloudflare blocked POST API")
+                        if fsErr == nil {
+                                workingURL, edgeErr := findWorkingEdgeURL(ctx, client, stream.HLSSource)
+                                if edgeErr != nil {
+                                        return nil, status, edgeErr
                                 }
-                                
-                                // FlareSolverr succeeded
-                                fmt.Printf("[SUCCESS] FlareSolverr bypassed Cloudflare for %s\n", username)
-                                
-                                if status == "offline" || hlsURL == "" {
-                                        return nil, status, internal.ErrChannelOffline
-                                }
-                                
-                                if status == "private" {
-                                        return nil, status, internal.ErrPrivateStream
-                                }
-                                
-                                return &Stream{HLSSource: hlsURL}, status, nil
+                                return &Stream{HLSSource: workingURL}, status, nil
                         }
-                        
-                        fmt.Printf("[WARN] Cloudflare blocked %s but FLARESOLVERR_URL not configured\n", username)
+                        fmt.Printf("[WARN] FlareSolverr failed for %s: %v\n", username, fsErr)
+                        fmt.Printf("[WARN] Cloudflare blocked %s but bypass did not succeed\n", username)
                 }
                 
                 // Try the old GET API as final fallback
@@ -142,6 +151,17 @@ func FetchStream(ctx context.Context, client *internal.Req, username string) (*S
                 }
 
                 if resp.HLSSource == "" {
+                        if resp.RoomStatus == StatusPublic {
+                                stream, status, fsErr := tryFlareSolverrStream(ctx, username, "GET API returned public without HLS")
+                                if fsErr == nil {
+                                        workingURL, edgeErr := findWorkingEdgeURL(ctx, client, stream.HLSSource)
+                                        if edgeErr != nil {
+                                                return nil, status, edgeErr
+                                        }
+                                        return &Stream{HLSSource: workingURL}, status, nil
+                                }
+                                fmt.Printf("[WARN] Byparr fallback after empty GET HLS failed for %s: %v\n", username, fsErr)
+                        }
                         return nil, resp.RoomStatus, internal.ErrChannelOffline
                 }
 
@@ -174,15 +194,31 @@ func FetchStream(ctx context.Context, client *internal.Req, username string) (*S
                 getResp, apiErr := fetchAPIResponse(ctx, client, username)
                 if apiErr == nil && getResp.HLSSource != "" {
                         resp = *getResp
-                } else if apiErr == nil {
-                        // GET API also returned no stream — channel is truly offline/not streaming
-                        switch getResp.RoomStatus {
-                        case StatusPrivate:
-                                return nil, getResp.RoomStatus, internal.ErrPrivateStream
-                        default:
-                                return nil, getResp.RoomStatus, internal.ErrChannelOffline
-                        }
                 } else {
+                        roomStatus := resp.RoomStatus
+                        if apiErr == nil {
+                                roomStatus = getResp.RoomStatus
+                        }
+                        // Room may show as public while HLS is withheld (common on datacenter IPs / without cookies).
+                        if roomStatus == StatusPublic || resp.RoomStatus == StatusPublic {
+                                stream, status, fsErr := tryFlareSolverrStream(ctx, username, "live room but no HLS URL from API")
+                                if fsErr == nil {
+                                        workingURL, edgeErr := findWorkingEdgeURL(ctx, client, stream.HLSSource)
+                                        if edgeErr != nil {
+                                                return nil, status, edgeErr
+                                        }
+                                        return &Stream{HLSSource: workingURL}, status, nil
+                                }
+                                fmt.Printf("[WARN] Byparr could not obtain HLS for %s: %v\n", username, fsErr)
+                        }
+                        if apiErr == nil {
+                                switch getResp.RoomStatus {
+                                case StatusPrivate:
+                                        return nil, getResp.RoomStatus, internal.ErrPrivateStream
+                                default:
+                                        return nil, getResp.RoomStatus, internal.ErrChannelOffline
+                                }
+                        }
                         return nil, resp.RoomStatus, internal.ErrChannelOffline
                 }
         }

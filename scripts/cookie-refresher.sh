@@ -11,19 +11,24 @@ while true; do
   RESPONSE=$(curl -sS --fail --retry 3 --retry-all-errors --retry-delay 5 --max-time 240 -X POST http://byparr-lb/v1 \
     -H 'Content-Type: application/json' \
     -d '{"cmd":"request.get","url":"https://chaturbate.com","maxTimeout":180000}')
-  CF_COOKIE=$(echo "$RESPONSE" | jq -r '.solution.cookies[] | select(.name=="cf_clearance") | .name + "=" + .value' 2>/dev/null)
+  CF_COOKIE=$(echo "$RESPONSE" | jq -r '.solution.cookies[] | select(.name=="cf_clearance" or .name=="csrftoken") | .name + "=" + .value' 2>/dev/null | paste -sd '; ' -)
   CF_USER_AGENT=$(echo "$RESPONSE" | jq -r '.solution.userAgent // empty' 2>/dev/null)
   if [ -n "$CF_COOKIE" ]; then
-    echo "[COOKIE] Refreshed cf_clearance"
+    echo "[COOKIE] Refreshed cookies (cf_clearance + csrftoken when present)"
     if [ -n "$CF_USER_AGENT" ]; then
       body=$(jq -n --arg cookies "$CF_COOKIE" --arg ua "$CF_USER_AGENT" '{cookies:$cookies, user_agent:$ua}')
     else
       body=$(jq -n --arg cookies "$CF_COOKIE" '{cookies:$cookies}')
     fi
-    curl -s --max-time 10 -X POST http://chaturbate-dvr:8080/update_config \
+    HTTP_CODE=$(curl -sS -o /tmp/cookie-push.json -w '%{http_code}' --max-time 15 -X POST http://chaturbate-dvr:8080/update_config \
       -H 'Content-Type: application/json' \
-      -d "$body" > /dev/null 2>&1
-    echo '[COOKIE] Pushed to chaturbate-dvr'
+      -d "$body")
+    if [ "$HTTP_CODE" = "200" ]; then
+      echo '[COOKIE] Pushed to chaturbate-dvr (ok)'
+    else
+      echo "[COOKIE] Failed to push cookies (HTTP $HTTP_CODE)"
+      cat /tmp/cookie-push.json 2>/dev/null || true
+    fi
   else
     echo '[COOKIE] Failed to get cf_clearance, retrying...'
   fi

@@ -91,7 +91,6 @@ jobs:
           echo "valid=true" >> "$GITHUB_OUTPUT"
 
       - name: Start Byparr (Cloudflare bypass)
-        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
@@ -99,15 +98,19 @@ jobs:
           echo "Starting Byparr..."
           docker compose up -d byparr byparr-lb
 
-          echo "⏳ Waiting 60 seconds for Byparr to initialize..."
-          echo "   (Playwright browser engine needs time to start without API polling)"
-          sleep 60
+          echo "Waiting for Byparr load balancer..."
+          for attempt in {1..45}; do
+            if curl -fsS --max-time 5 http://localhost:8191/backend-health >/dev/null; then
+              echo "Byparr backend is healthy"
+              exit 0
+            fi
+            sleep 4
+          done
 
-          if docker compose ps --status running --services | grep -qx "byparr"; then
-            echo "✅ Byparr container is running"
-          else
-            echo "⚠️  Byparr container may not have started properly"
-          fi
+          echo "Byparr did not become healthy in time"
+          docker compose ps
+          docker compose logs --tail=80 byparr byparr-lb || true
+          exit 1
 
       - name: Start recorder stack
         shell: bash
@@ -119,6 +122,18 @@ jobs:
 
           echo "Running services:"
           docker compose ps
+
+          echo "Waiting for cookie-refresher to push initial cookies..."
+          for attempt in {1..90}; do
+            if docker compose logs cookie-refresher 2>/dev/null | grep -q 'Pushed to chaturbate-dvr (ok)'; then
+              echo "Initial Cloudflare cookies applied"
+              break
+            fi
+            if docker compose logs cookie-refresher 2>/dev/null | grep -q 'Failed to push cookies'; then
+              echo "cookie-refresher could not push cookies yet (attempt $attempt/90)"
+            fi
+            sleep 5
+          done
 
       - name: Wait for web UI
         shell: bash

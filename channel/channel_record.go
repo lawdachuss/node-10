@@ -45,7 +45,11 @@ func (ch *Channel) Monitor() {
 				cfBlockCount = 0
 				ch.RoomStatus = client.LastRoomStatus
 				ch.Update()
-				ch.Info("channel is %s, try again in %d min(s)", ch.RoomStatus, server.Config.Interval)
+				if ch.RoomStatus == chaturbate.StatusPublic && errors.Is(err, internal.ErrChannelOffline) {
+					ch.Info("channel is live but stream URL unavailable (check Byparr/cookies); try again in %d min(s)", server.Config.Interval)
+				} else {
+					ch.Info("channel is %s, try again in %d min(s)", ch.RoomStatus, server.Config.Interval)
+				}
 			} else if errors.Is(err, context.Canceled) {
 				cfBlockCount = 0
 			} else {

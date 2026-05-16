@@ -50,26 +50,22 @@ func PostChaturbateAPI(ctx context.Context, username, csrfToken string) (string,
 	req.Header.Set("Sec-Ch-Ua-Mobile", "?0")
 	req.Header.Set("Sec-Ch-Ua-Platform", `"Windows"`)
 	req.Header.Set("X-Requested-With", "XMLHttpRequest")
-	req.Header.Set("X-CSRFToken", csrfToken)
 	req.Header.Set("Referer", fmt.Sprintf("https://chaturbate.com/%s", username))
 	req.Header.Set("Origin", "https://chaturbate.com")
 
-	// Add cookies - sanitize to remove any invalid characters
-	cookieStr := fmt.Sprintf("csrftoken=%s", csrfToken)
+	sanitized := ""
 	if server.Config.Cookies != "" {
-		// Remove any newlines, carriage returns, or other control characters
-		sanitized := strings.Map(func(r rune) rune {
+		sanitized = strings.Map(func(r rune) rune {
 			if r == '\n' || r == '\r' || r == '\t' || r < 32 {
-				return -1 // drop the character
+				return -1
 			}
 			return r
 		}, server.Config.Cookies)
 		sanitized = strings.TrimSpace(sanitized)
-		if sanitized != "" {
-			cookieStr = sanitized + "; " + cookieStr
-		}
 	}
-	req.Header.Set("Cookie", cookieStr)
+	csrfToken = CSRFTokenForRequest(sanitized)
+	req.Header.Set("X-CSRFToken", csrfToken)
+	req.Header.Set("Cookie", FormatCookieHeader(sanitized, csrfToken))
 
 	// Create client with timeout
 	client := &http.Client{
@@ -96,10 +92,12 @@ func PostChaturbateAPI(ctx context.Context, username, csrfToken string) (string,
 
 	bodyStr := string(body)
 
-	// Check for Cloudflare block - only if body contains CF-specific markers
-	isCFBlock := strings.Contains(bodyStr, "<title>Just a moment...</title>") ||
-		strings.Contains(bodyStr, "Checking your browser") ||
-		strings.Contains(bodyStr, "cloudflare")
+	// Cloudflare challenge pages are HTML; API JSON responses are not CF blocks.
+	trimmed := strings.TrimSpace(bodyStr)
+	isCFBlock := !strings.HasPrefix(trimmed, "{") && (
+		strings.Contains(bodyStr, "<title>Just a moment...</title>") ||
+			strings.Contains(bodyStr, "Checking your browser") ||
+			strings.Contains(bodyStr, "cf-browser-verification"))
 
 	if isCFBlock {
 		return "", ErrCloudflareBlocked

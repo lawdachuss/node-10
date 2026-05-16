@@ -1,15 +1,18 @@
-﻿name: 24/7 Recorder
+name: 24/7 Recorder
 
 on:
   workflow_dispatch:
     inputs:
       duration_hours:
-        description: 'Recording duration in hours'
-        default: '5'
+        description: Recording duration in hours (1-5)
+        required: false
+        default: "5"
   push:
-    branches: [ main, master ]
+    branches:
+      - main
+      - master
     paths:
-      - '.github/workflows/recorder.yml'
+      - .github/workflows/recorder.yml
 
 concurrency:
   group: recorder
@@ -18,366 +21,262 @@ concurrency:
 permissions:
   actions: write
   contents: write
-  workflows: write
+
+env:
+  APP_URL: http://localhost:8080
+  COMPOSE_PROJECT_NAME: recorder
+  SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+  SUPABASE_API_KEY: ${{ secrets.SUPABASE_API_KEY }}
+  STREAMTAPE_LOGIN: ${{ secrets.STREAMTAPE_LOGIN }}
+  STREAMTAPE_API_KEY: ${{ secrets.STREAMTAPE_API_KEY }}
+  VOESX_API_KEY: ${{ secrets.VOESX_API_KEY }}
+  SENDCM_API_KEY: ${{ secrets.SENDCM_API_KEY }}
+  GOFILE_API_KEY: ${{ secrets.GOFILE_API_KEY }}
+  BYSE_API_KEY: ${{ secrets.BYSE_API_KEY }}
+  PROXY_SERVER: ${{ secrets.PROXY_SERVER }}
+  PROXY_USERNAME: ${{ secrets.PROXY_USERNAME }}
+  PROXY_PASSWORD: ${{ secrets.PROXY_PASSWORD }}
 
 jobs:
   record:
+    name: Record and upload
     runs-on: ubuntu-latest
-    timeout-minutes: 360  # 6h â€” 1h buffer over 5h recording
+    timeout-minutes: 360
 
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Create directories
+      - name: Prepare workspace
+        shell: bash
         run: |
+          set -euo pipefail
+
           mkdir -p videos conf database emergency-backup
-          echo "[INFO] Disk space:"; df -h /
 
-      - name: Verify Supabase credentials
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_API_KEY: ${{ secrets.SUPABASE_API_KEY }}
+          echo "Workspace: $GITHUB_WORKSPACE"
+          echo "Disk space:"
+          df -h /
+
+      - name: Validate configuration
+        id: config
+        shell: bash
         run: |
-          if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_API_KEY" ]; then
-            echo "[ERROR] Supabase credentials not configured"; exit 1
+          set -euo pipefail
+
+          duration="${{ inputs.duration_hours || '5' }}"
+          if ! [[ "$duration" =~ ^[0-9]+$ ]]; then
+            echo "duration_hours must be a whole number."
+            exit 1
           fi
-          echo "[SUCCESS] Supabase credentials found"
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+          if (( duration < 1 || duration > 5 )); then
+            echo "duration_hours must be between 1 and 5 on GitHub-hosted runners."
+            exit 1
+          fi
 
-      - name: Start Byparr (Cloudflare bypass)
+          if [[ -z "${SUPABASE_URL}" || -z "${SUPABASE_API_KEY}" ]]; then
+            echo "SUPABASE_URL and SUPABASE_API_KEY secrets are required."
+            exit 1
+          fi
+
+          echo "DURATION_HOURS=$duration" >> "$GITHUB_ENV"
+          echo "RUN_VALIDATED=true" >> "$GITHUB_ENV"
+          echo "duration=$duration" >> "$GITHUB_OUTPUT"
+          echo "valid=true" >> "$GITHUB_OUTPUT"
+
+      - name: Start recorder stack
+        shell: bash
         run: |
-          docker network create recorder-network 2>/dev/null || true
-          docker pull ghcr.io/thephaseless/byparr:latest
-          docker run -d --name byparr --network recorder-network -p 8191:8191 \
-            -e HOST=0.0.0.0 -e PORT=8191 -e TIMEOUT=180 -e LOG_LEVEL=INFO \
-            ghcr.io/thephaseless/byparr:latest
-          echo "Waiting for Byparr on port 8191..."
-          for i in $(seq 1 15); do
-            if curl -sf http://localhost:8191 > /dev/null 2>&1; then
-              echo "Byparr ready after ${i}s"
-              break
-            fi
-            if [ "$i" -eq 15 ]; then
-              echo "Byparr not responding, continuing anyway"
-            fi
-            sleep 2
-          done
+          set -euo pipefail
 
-      - name: Build and start Chaturbate DVR
+          docker compose up -d --build
+
+          echo "Running services:"
+          docker compose ps
+
+      - name: Wait for web UI
+        shell: bash
         run: |
-          git clone --depth 1 https://github.com/gogoqaz/chaturbate-dvr.git .build/chaturbate-dvr
-          docker buildx build \
-            --cache-from type=gha \
-            --cache-to type=gha,mode=max \
-            -t chaturbate-dvr:latest --load .build/chaturbate-dvr
+          set -euo pipefail
 
-          docker run -d --name chaturbate-dvr \
-            --restart=unless-stopped \
-            --network recorder-network \
-            -p 8080:8080 \
-            -v $(pwd)/videos:/usr/src/app/videos \
-            -v $(pwd)/conf:/usr/src/app/conf \
-            -v $(pwd)/database:/database \
-            chaturbate-dvr:latest --port 8080 --compress=false
+          for attempt in {1..45}; do
+            if curl -fsS --max-time 5 "$APP_URL" >/dev/null; then
+              echo "Web UI is ready."
+              exit 0
+            fi
 
-          # Wait until port 8080 is actually accepting connections
-          echo "â³ Waiting for app on port 8080..."
-          APP_STARTED=false
-          for i in $(seq 1 45); do
-            # Check if container is still running
-            if ! docker ps --format '{{.Names}}' | grep -q '^chaturbate-dvr$'; then
-              echo "âŒ Container stopped unexpectedly!"
-              docker logs chaturbate-dvr
+            if ! docker compose ps --status running --services | grep -qx "chaturbate-dvr"; then
+              echo "chaturbate-dvr stopped before becoming ready."
+              docker compose logs --tail=100 chaturbate-dvr
               exit 1
             fi
-            
-            # Try to connect to the app
-            if curl -sf --max-time 5 http://localhost:8080 > /dev/null 2>&1; then
-              echo "âœ… App ready after $((i * 2)) seconds"
-              APP_STARTED=true
-              break
-            fi
-            
-            # Show progress every 5 attempts
-            if [ $((i % 5)) -eq 0 ]; then
-              echo "â³ Still waiting... ($i/45 attempts)"
-            fi
-            
+
             sleep 2
           done
-          
-          if [ "$APP_STARTED" = false ]; then
-            echo "âŒ App never came up after 90 seconds"
-            echo "Container status:"; docker ps -a | grep chaturbate-dvr
-            echo "Container logs:"; docker logs chaturbate-dvr
-            exit 1
-          fi
 
-          # Verify app is responding
-          echo "ðŸ” Verifying app is responding..."
-          if curl -sf --max-time 5 http://localhost:8080 > /dev/null 2>&1; then
-            echo "âœ… App is responding"
-          else
-            echo "âš ï¸  App may not be fully ready"
-          fi
+          echo "Web UI did not become ready in time."
+          docker compose ps
+          docker compose logs --tail=150 chaturbate-dvr
+          exit 1
 
-          echo "ðŸ“‹ Container logs (last 50 lines):"
-          docker logs chaturbate-dvr 2>&1 | tail -50
-
-      - name: Start cookie refresher (auto Cloudflare bypass)
+      - name: Install cloudflared
+        shell: bash
         run: |
-          chmod +x scripts/cookie-refresher.sh
-          docker run -d --name cookie-refresher \
-            --restart=unless-stopped \
-            --network recorder-network \
-            -v $(pwd)/scripts/cookie-refresher.sh:/cookie-refresher.sh:ro \
-            alpine:3 sh /cookie-refresher.sh || echo "âš ï¸ cookie-refresher startup issue (non-critical)"
-          echo "âœ… Cookie refresher started"
+          set -euo pipefail
 
-      - name: Start uploader (GoFile, Streamtape, VoeSX, SendCM auto-upload)
-        run: |
-          chmod +x scripts/uploader_daemon.py
-          docker run -d --name uploader \
-            --restart=unless-stopped \
-            --network recorder-network \
-            -e STREAMTAPE_LOGIN="${{ secrets.STREAMTAPE_LOGIN }}" \
-            -e STREAMTAPE_API_KEY="${{ secrets.STREAMTAPE_API_KEY }}" \
-            -e VOESX_API_KEY="${{ secrets.VOESX_API_KEY }}" \
-            -e SENDCM_API_KEY="${{ secrets.SENDCM_API_KEY }}" \
-            -v $(pwd)/videos:/videos \
-            -v $(pwd)/database:/database \
-            -v $(pwd)/scripts/uploader_daemon.py:/uploader_daemon.py:ro \
-            python:3.12-alpine sh -c "apk add --no-cache ffmpeg > /dev/null 2>&1 && pip install requests --quiet && python /uploader_daemon.py" \
-            || echo "âš ï¸ uploader startup issue (non-critical)"
-          echo "âœ… Uploader started"
+          curl -fsSL \
+            -o cloudflared.deb \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared.deb
+          cloudflared --version
 
-      - name: Install and start Cloudflare Tunnel
-        id: cloudflare_tunnel
-        continue-on-error: true
+      - name: Start Cloudflare tunnel
+        id: tunnel
+        shell: bash
         run: |
-          echo "Verifying app is responding..."
-          for i in $(seq 1 10); do
-            if curl -sf http://localhost:8080 > /dev/null 2>&1; then
-              echo "App confirmed ready"
-              APP_READY=true
+          set -euo pipefail
+
+          rm -f tunnel.log tunnel.pid tunnel_url.txt
+          cloudflared tunnel --url "$APP_URL" --no-autoupdate > tunnel.log 2>&1 &
+          echo "$!" > tunnel.pid
+
+          tunnel_url=""
+          for attempt in {1..24}; do
+            tunnel_url="$(grep -Eo 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' tunnel.log | head -n 1 || true)"
+            if [[ -n "$tunnel_url" ]]; then
               break
             fi
-            sleep 3
-          done
-          if [ "$APP_READY" != true ]; then
-            echo "App not responding on port 8080"
-            docker logs chaturbate-dvr --tail 50
-            exit 1
-          fi
-
-          curl -L --output cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
-          sudo dpkg -i cloudflared.deb
-
-          pkill -f cloudflared 2>/dev/null || true
-          sleep 2
-          rm -f tunnel.log
-          cloudflared tunnel --url http://localhost:8080 --no-autoupdate > tunnel.log 2>&1 &
-          TUNNEL_PID=$!
-
-          echo "Waiting for tunnel URL..."
-          TUNNEL_URL=""
-          for i in $(seq 1 18); do
-            TUNNEL_URL=$(grep -oP 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' tunnel.log | head -1)
-            if [ -n "$TUNNEL_URL" ]; then break; fi
             sleep 5
           done
 
-          if [ -z "$TUNNEL_URL" ]; then
-            echo "Failed to get tunnel URL"
+          if [[ -z "$tunnel_url" ]]; then
+            echo "Cloudflare tunnel URL was not created."
             cat tunnel.log
             exit 1
           fi
-          echo "Tunnel URL: $TUNNEL_URL"
 
-          echo "Verifying tunnel accessibility..."
-          for i in $(seq 1 12); do
-            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 10 --max-time 15 "$TUNNEL_URL" 2>/dev/null || echo "000")
-            if [ "$HTTP_CODE" = "200" ]; then
-              echo "Tunnel verified accessible"
+          echo "$tunnel_url" > tunnel_url.txt
+          echo "TUNNEL_URL=$tunnel_url" >> "$GITHUB_ENV"
+          echo "url=$tunnel_url" >> "$GITHUB_OUTPUT"
+
+          for attempt in {1..12}; do
+            status="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 10 --max-time 15 "$tunnel_url" || true)"
+            if [[ "$status" == "200" ]]; then
+              echo "Tunnel is reachable: $tunnel_url"
               break
-            fi
-            if [ "$i" -eq 12 ]; then
-              echo "Tunnel not yet accessible (HTTP $HTTP_CODE), continuing anyway"
             fi
             sleep 5
           done
 
-          echo "$TUNNEL_URL" > tunnel_url.txt
-          echo "TUNNEL_URL=$TUNNEL_URL" >> $GITHUB_ENV
+          curl -fsS -X POST "${SUPABASE_URL}/rest/v1/tunnel_sessions" \
+            -H "apikey: ${SUPABASE_API_KEY}" \
+            -H "Authorization: Bearer ${SUPABASE_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -H "Prefer: return=minimal" \
+            -d "{\"run_id\": ${GITHUB_RUN_NUMBER}, \"url\": \"${tunnel_url}\", \"started_at\": \"$(date -u +%FT%TZ)\", \"is_active\": true}" \
+            || echo "Could not save tunnel URL to Supabase."
 
-          echo "Saving tunnel URL to Supabase..."
-          for attempt in 1 2 3; do
-            HTTP_CODE=$(curl -s -w "%{http_code}" -o /tmp/supabase_response.txt \
-              -X POST "${{ secrets.SUPABASE_URL }}/rest/v1/tunnel_sessions" \
-              -H "apikey: ${{ secrets.SUPABASE_API_KEY }}" \
-              -H "Content-Type: application/json" \
-              -H "Prefer: return=minimal" \
-              -d "{\"run_id\": ${{ github.run_number }}, \"url\": \"$TUNNEL_URL\", \"started_at\": \"$(date -u +%FT%TZ)\", \"is_active\": true}")
-            if [ "$HTTP_CODE" = "201" ] || [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "204" ]; then
-              echo "Tunnel URL saved"
-              break
-            fi
-            echo "Save attempt $attempt failed (HTTP $HTTP_CODE)"
-            [ $attempt -lt 3 ] && sleep 3
-          done
-
-          echo ""
-          echo "=============================="
-          echo "  WEB UI ACCESS"
-          echo "=============================="
-          echo ""
-          echo "  $TUNNEL_URL"
-          echo ""
-
-      - name: Create GitHub Actions Summary
+      - name: Publish run summary
         if: always()
+        shell: bash
         run: |
-          echo "# ðŸŒ Chaturbate DVR Web UI Access" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          
-          if [ -n "$TUNNEL_URL" ]; then
-            echo "## âœ… Tunnel Active" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "**Access your recorder at:**" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "ðŸ”— [$TUNNEL_URL]($TUNNEL_URL)" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "---" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "- **Run ID:** ${{ github.run_number }}" >> $GITHUB_STEP_SUMMARY
-            echo "- **Started:** $(date -u +%Y-%m-%d\ %H:%M:%S\ UTC)" >> $GITHUB_STEP_SUMMARY
-            echo "- **Duration:** ${{ github.event.inputs.duration_hours || '5' }} hours" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "> âš ï¸ **Note:** This URL is only active while the workflow is running. It will expire when the run completes." >> $GITHUB_STEP_SUMMARY
-          else
-            echo "## âŒ Tunnel Failed" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "The tunnel could not be established. Check the logs above for details." >> $GITHUB_STEP_SUMMARY
-          fi
+          {
+            echo "# Recorder run"
+            echo
+            echo "- Run: ${GITHUB_RUN_NUMBER}"
+            echo "- Duration: ${DURATION_HOURS:-unknown} hour(s)"
+            echo "- Started: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+            if [[ -n "${TUNNEL_URL:-}" ]]; then
+              echo "- Web UI: ${TUNNEL_URL}"
+            else
+              echo "- Web UI: tunnel was not created"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Record for 5 hours
+      - name: Keep recorder running
+        shell: bash
         run: |
-          graceful_shutdown() {
-            echo "âš ï¸  Stopping chaturbate-dvr gracefully..."
-            docker exec chaturbate-dvr pkill -SIGTERM -f chaturbate-dvr 2>/dev/null || true
-            sleep 30
-            docker cp chaturbate-dvr:/usr/src/app/videos/. emergency-backup/ 2>/dev/null || true
-            CANCELLED=true
+          set -euo pipefail
+
+          finish_at="$(($(date +%s) + DURATION_HOURS * 3600))"
+          last_heartbeat=0
+
+          stop_recorder() {
+            echo "Stopping recorder gracefully."
+            docker compose stop -t 300 chaturbate-dvr || true
+            mkdir -p emergency-backup
+            docker compose cp chaturbate-dvr:/usr/src/app/videos/. emergency-backup/ 2>/dev/null || true
           }
 
-          trap 'graceful_shutdown' SIGTERM SIGINT
-          CANCELLED=false
+          trap stop_recorder SIGINT SIGTERM
 
-          DURATION_HOURS="${{ github.event.inputs.duration_hours }}"
-          DURATION_HOURS="${DURATION_HOURS:-5}"
-          END_TIME=$(($(date +%s) + DURATION_HOURS * 3600))
-          LAST_HEARTBEAT=0
+          while (( $(date +%s) < finish_at )); do
+            if ! docker compose ps --status running --services | grep -qx "chaturbate-dvr"; then
+              echo "chaturbate-dvr is not running. Recent logs:"
+              docker compose logs --tail=120 chaturbate-dvr || true
+              docker compose up -d chaturbate-dvr
 
-          while [ $(date +%s) -lt $END_TIME ] && [ "$CANCELLED" = false ]; do
-            # Check if container is still running
-            if ! docker ps --format '{{.Names}}' | grep -q '^chaturbate-dvr$'; then
-              echo "âš ï¸  Container stopped unexpectedly!"
-              docker logs --tail 100 chaturbate-dvr 2>/dev/null || true
-              echo "âš ï¸  Attempting to restart container..."
-              
-              # Try to restart the container
-              docker start chaturbate-dvr 2>/dev/null || {
-                echo "âŒ Failed to restart container, exiting"
-                break
-              }
-              
-              # Wait for app to be ready
-              for i in $(seq 1 30); do
-                if curl -sf http://localhost:8080 > /dev/null 2>&1; then
-                  echo "âœ… Container restarted successfully"
-                  break
-                fi
-                if [ "$i" -eq 30 ]; then
-                  echo "âŒ Container failed to restart properly"
+              for attempt in {1..30}; do
+                if curl -fsS --max-time 5 "$APP_URL" >/dev/null; then
+                  echo "chaturbate-dvr restarted successfully."
                   break
                 fi
                 sleep 2
               done
             fi
 
-            CURRENT_TIME=$(date +%s)
-
-            if [ $((CURRENT_TIME - LAST_HEARTBEAT)) -gt 300 ]; then
-              curl -s -X POST "${{ secrets.SUPABASE_URL }}/rest/v1/heartbeats" \
-                -H "apikey: ${{ secrets.SUPABASE_API_KEY }}" \
+            now="$(date +%s)"
+            if (( now - last_heartbeat >= 300 )); then
+              curl -fsS -X POST "${SUPABASE_URL}/rest/v1/heartbeats" \
+                -H "apikey: ${SUPABASE_API_KEY}" \
+                -H "Authorization: Bearer ${SUPABASE_API_KEY}" \
                 -H "Content-Type: application/json" \
                 -H "Prefer: return=minimal" \
-                -d "{\"run_id\": ${{ github.run_number }}, \"timestamp\": \"$(date -u +%FT%TZ)\", \"tunnel_url\": \"$TUNNEL_URL\"}" \
-                > /dev/null 2>&1 || true
-              LAST_HEARTBEAT=$CURRENT_TIME
+                -d "{\"run_id\": ${GITHUB_RUN_NUMBER}, \"timestamp\": \"$(date -u +%FT%TZ)\", \"tunnel_url\": \"${TUNNEL_URL:-}\"}" \
+                >/dev/null || true
+              last_heartbeat="$now"
             fi
 
             sleep 60
           done
 
-          # Final backup
-          echo "ðŸ“¦ Performing final backup..."
-          docker cp chaturbate-dvr:/usr/src/app/videos/. emergency-backup/ 2>/dev/null || true
-
-      - name: Commit recordings database to repo
+      - name: Back up generated files
         if: always()
+        shell: bash
         run: |
-          if [ -f database/recordings.json ]; then
-            git config user.name "github-actions"
-            git config user.email "github-actions@github.com"
-            git add database/recordings.json
-            if git diff --staged --quiet; then
-              echo "No changes to commit"
-            else
-              git commit -m "Update recordings database [skip ci]"
-              git push
-              echo "âœ… Recordings database committed"
-            fi
-          else
-            echo "No recordings database found"
+          set -euo pipefail
+
+          mkdir -p emergency-backup
+          docker compose cp chaturbate-dvr:/usr/src/app/videos/. emergency-backup/ 2>/dev/null || true
+
+          echo "Emergency backup contents:"
+          find emergency-backup -maxdepth 2 -type f -printf '%p\n' | head -100 || true
+
+      - name: Save recordings database
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ ! -f database/recordings.json ]]; then
+            echo "database/recordings.json was not created."
+            exit 0
           fi
 
-      - name: Trigger next run
-        if: always()
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          echo "ðŸ” Checking for pending workflow runs..."
-          
-          CURRENT_RUN_ID=${{ github.run_id }}
-          
-          PENDING_RUNS=$(gh run list --workflow="24/7 Recorder" --status=queued,in_progress \
-            --json databaseId --jq "[.[] | select(.databaseId != $CURRENT_RUN_ID) | .databaseId] | length")
-          
-          echo "Found $PENDING_RUNS pending runs (excluding current: $CURRENT_RUN_ID)"
-          
-          if [ "$PENDING_RUNS" -gt 0 ]; then
-            echo "âœ… Next run already queued/running, skipping trigger"
-          else
-            echo "ðŸ” No other pending runs, triggering next run..."
-            gh workflow run "${{ github.workflow }}" --repo "${{ github.repository }}"
-            echo "âœ… Next run queued"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add database/recordings.json
+
+          if git diff --staged --quiet; then
+            echo "No recordings database changes to commit."
+            exit 0
           fi
 
-      - name: Cleanup
-        if: always()
-        run: |
-          docker stop --time=60 chaturbate-dvr byparr 2>/dev/null || true
-          docker rm -f chaturbate-dvr byparr cookie-refresher uploader 2>/dev/null || true
-          docker network rm recorder-network 2>/dev/null || true
-          docker system prune -af --volumes 2>/dev/null || true
-          pkill -f cloudflared 2>/dev/null || true
-          rm -rf videos/* emergency-backup/* 2>/dev/null || true
+          git commit -m "Update recordings database [skip ci]"
+          git push
 
-      - name: Upload artifacts (emergency fallback)
+      - name: Upload emergency artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -386,3 +285,51 @@ jobs:
           retention-days: 30
           if-no-files-found: ignore
 
+      - name: Queue next run
+        if: always() && steps.config.outputs.valid == 'true' && !cancelled()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          queued_or_running="$(
+            gh run list \
+              --workflow "$GITHUB_WORKFLOW" \
+              --limit 20 \
+              --json databaseId,status \
+              --jq "[.[] | select(.databaseId != ${GITHUB_RUN_ID} and (.status == \"queued\" or .status == \"in_progress\"))] | length"
+          )"
+
+          if (( queued_or_running > 0 )); then
+            echo "Another recorder run is already queued or running."
+            exit 0
+          fi
+
+          gh workflow run "$GITHUB_WORKFLOW" --repo "$GITHUB_REPOSITORY" \
+            -f duration_hours="${{ steps.config.outputs.duration }}"
+          echo "Queued the next recorder run."
+
+      - name: Cleanup
+        if: always()
+        shell: bash
+        run: |
+          set +e
+
+          if [[ -n "${TUNNEL_URL:-}" ]]; then
+            curl -sS -X PATCH "${SUPABASE_URL}/rest/v1/tunnel_sessions?run_id=eq.${GITHUB_RUN_NUMBER}" \
+              -H "apikey: ${SUPABASE_API_KEY}" \
+              -H "Authorization: Bearer ${SUPABASE_API_KEY}" \
+              -H "Content-Type: application/json" \
+              -H "Prefer: return=minimal" \
+              -d "{\"is_active\": false, \"last_seen_at\": \"$(date -u +%FT%TZ)\"}" \
+              >/dev/null || true
+          fi
+
+          if [[ -f tunnel.pid ]]; then
+            kill "$(cat tunnel.pid)" 2>/dev/null || true
+          fi
+          pkill -f cloudflared 2>/dev/null || true
+
+          docker compose down --remove-orphans --volumes
+          docker system prune -af --volumes

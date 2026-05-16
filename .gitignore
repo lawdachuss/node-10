@@ -5,18 +5,22 @@ bin/
 *.exe
 
 # Videos and recordings
-videos/
+videos/*
+!videos/.gitkeep
 *.mp4
 *.mkv
 *.flv
 *.ts
 
 # Configuration (contains sensitive data)
-conf/
+conf/*
+!conf/.gitkeep
 settings.json
 
 # Database files
-database/
+database/*
+!database/.gitkeep
+!database/recordings.json
 
 # AWS secrets and keys
 aws-secrets/

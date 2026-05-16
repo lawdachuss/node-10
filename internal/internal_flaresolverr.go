@@ -213,14 +213,14 @@ func FetchStreamViaFlareSolverr(ctx context.Context, username string) (string, s
 		return "", "", fmt.Errorf("FLARESOLVERR_URL not configured")
 	}
 
-	// Get the page via FlareSolverr
+	// Step 1: Get the page via FlareSolverr to obtain fresh cookies and user-agent
 	pageURL := fmt.Sprintf("%s%s/", server.Config.Domain, username)
 	cookies, userAgent, err := GetFreshCookiesViaFlareSolverr(ctx, pageURL)
 	if err != nil {
 		return "", "", fmt.Errorf("get fresh cookies: %w", err)
 	}
 
-	// Update server config with fresh cookies and user agent
+	// Step 2: Update server config with fresh cookies and user agent
 	if cookies != "" {
 		server.Config.Cookies = cookies
 	}
@@ -228,71 +228,42 @@ func FetchStreamViaFlareSolverr(ctx context.Context, username string) (string, s
 		server.Config.UserAgent = userAgent
 	}
 
-	// Now try to fetch the stream with the fresh cookies
-	// Make a request to get the page HTML
-	sessionID := fmt.Sprintf("session_%d", time.Now().UnixNano())
-	reqBody := flareSolverrRequest{
-		Cmd:        "request.get",
-		URL:        pageURL,
-		MaxTimeout: 180000,
-		Session:    sessionID,
-	}
-
-	jsonData, err := json.Marshal(reqBody)
+	// Step 3: Use the fresh cookies to call the POST API
+	// (Same as direct API call, but now we have valid Cloudflare cookies)
+	// This is more reliable than trying to extract m3u8 URL from HTML
+	csrfToken := fmt.Sprintf("%016x%016x", time.Now().UnixNano(), time.Now().UnixNano()^0xDEADBEEF)
+	
+	body, err := PostChaturbateAPI(ctx, username, csrfToken)
 	if err != nil {
-		return "", "", fmt.Errorf("marshal request: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "POST", flaresolverrURL, bytes.NewBuffer(jsonData))
-	if err != nil {
-		return "", "", fmt.Errorf("create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{Timeout: 360 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", "", fmt.Errorf("flaresolverr request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", "", fmt.Errorf("read response: %w", err)
-	}
-
-	var fsResp flareSolverrResponse
-	if err := json.Unmarshal(body, &fsResp); err != nil {
-		return "", "", fmt.Errorf("parse response: %w", err)
-	}
-
-	if fsResp.Status != "ok" {
-		return "", "", fmt.Errorf("flaresolverr error: %s", fsResp.Message)
-	}
-
-	// Parse the HTML to extract stream URL
-	html := fsResp.Solution.Response
-
-	// Check room status from HTML
-	if strings.Contains(html, "This room is currently offline") ||
-		strings.Contains(html, "has been banned") ||
-		strings.Contains(html, "Room is currently offline") {
+		// If POST API still fails after FlareSolverr bypass, room is truly offline/private
+		if strings.Contains(err.Error(), "forbidden") {
+			return "", "private", nil
+		}
 		return "", "offline", nil
 	}
 
-	if strings.Contains(html, "This room requires tokens") ||
-		strings.Contains(html, "private show") {
+	// Parse POST API response to get HLS URL and room status
+	var resp struct {
+		HLSSource  string `json:"hls_source"`
+		RoomStatus string `json:"room_status"`
+	}
+	if err := json.Unmarshal([]byte(body), &resp); err != nil {
+		return "", "offline", fmt.Errorf("failed to parse POST API response: %w", err)
+	}
+
+	// Handle room status
+	switch resp.RoomStatus {
+	case "private":
 		return "", "private", nil
+	case "away", "offline":
+		return "", "offline", nil
 	}
 
-	// Extract HLS URL from HTML
-	// Look for m3u8 URL in the page
-	re := regexp.MustCompile(`https://[^"'\s]+\.m3u8[^"'\s]*`)
-	matches := re.FindStringSubmatch(html)
-	if len(matches) > 0 {
-		hlsURL := matches[0]
-		return hlsURL, "public", nil
+	// If no HLS source, room is offline
+	if resp.HLSSource == "" {
+		return "", "offline", nil
 	}
 
-	return "", "offline", nil
+	// Successfully got HLS URL via FlareSolverr bypass
+	return resp.HLSSource, "public", nil
 }

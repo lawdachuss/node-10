@@ -43,6 +43,7 @@ RESPONSE=$(curl -sS --fail --max-time 200 -X POST http://localhost:8191/v1 \
     -d '{"cmd":"request.get","url":"https://chaturbate.com","maxTimeout":180000}' || echo '{}')
 
 CF_COOKIE=$(echo "$RESPONSE" | jq -r '.solution.cookies[]? | select(.name=="cf_clearance") | .name + "=" + .value' 2>/dev/null || echo "")
+CF_USER_AGENT=$(echo "$RESPONSE" | jq -r '.solution.userAgent // empty' 2>/dev/null || echo "")
 
 if [ -n "$CF_COOKIE" ]; then
     echo "  ✅ Got cf_clearance cookie"
@@ -67,9 +68,14 @@ echo ""
 # Step 5: Push cookie to recorder
 if [ -n "$CF_COOKIE" ]; then
     echo "[5/5] Pushing cookie to recorder..."
+    if [ -n "$CF_USER_AGENT" ]; then
+        body=$(jq -n --arg cookies "$CF_COOKIE" --arg ua "$CF_USER_AGENT" '{cookies:$cookies, user_agent:$ua}')
+    else
+        body=$(jq -n --arg cookies "$CF_COOKIE" '{cookies:$cookies}')
+    fi
     curl -sS --max-time 10 -X POST http://localhost:8080/update_config \
         -H 'Content-Type: application/json' \
-        -d "{\"cookies\":\"$CF_COOKIE\"}" > /dev/null 2>&1 && \
+        -d "$body" > /dev/null 2>&1 && \
         echo "  ✅ Cookie pushed successfully" || \
         echo "  ⚠️  Failed to push cookie"
 else

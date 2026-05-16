@@ -63,6 +63,8 @@
       - PROXY_URL=${PROXY_URL:-}
       - PROXY_USERNAME=${PROXY_USERNAME:-}
       - PROXY_PASSWORD=${PROXY_PASSWORD:-}
+      - COOKIES=${COOKIES:-}
+      - USER_AGENT=${USER_AGENT:-}
     ports:
       - "8080:8080"
     volumes:

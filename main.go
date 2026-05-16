@@ -88,14 +88,16 @@ func main() {
 				Value: 1,
 			},
 			&cli.StringFlag{
-				Name:  "cookies",
-				Usage: "Cookies to use in the request (format: key=value; key2=value2)",
-				Value: "",
+				Name:    "cookies",
+				Usage:   "Cookies to use in the request (format: key=value; key2=value2)",
+				EnvVars: []string{"COOKIES"},
+				Value:   "",
 			},
 			&cli.StringFlag{
-				Name:  "user-agent",
-				Usage: "Custom User-Agent for the request",
-				Value: "",
+				Name:    "user-agent",
+				Usage:   "Custom User-Agent for the request",
+				EnvVars: []string{"USER_AGENT"},
+				Value:   "",
 			},
 			&cli.StringFlag{
 				Name:  "domain",

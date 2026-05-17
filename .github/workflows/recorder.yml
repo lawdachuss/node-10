@@ -140,13 +140,16 @@ jobs:
               cookies_ok=true
               break
             fi
-            # Periodically show cookie-refresher progress
+            # Periodically show cookie-refresher and byparr progress
             if (( attempt % progress_check_interval == 1 )); then
               cookie_logs="$(docker compose logs chaturbate-dvr 2>/dev/null | grep '\[cookie-refresher\]' | tail -3 || true)"
               if [[ -n "$cookie_logs" ]]; then
                 echo "  Recent cookie-refresher activity:"
                 echo "$cookie_logs"
               fi
+              echo "  Byparr LB health: $(curl -sS --max-time 3 http://localhost:8191/backend-health 2>/dev/null || echo 'unreachable')"
+              echo "  Byparr LB nginx logs:"
+              docker compose logs --tail=5 byparr-lb 2>/dev/null || true
             fi
             sleep 5
           done

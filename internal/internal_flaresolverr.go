@@ -110,6 +110,9 @@ func GetFreshCookiesViaFlareSolverr(ctx context.Context, url string) (string, st
                 return "", "", fmt.Errorf("create session: %w", err)
         }
         resp.Body.Close()
+        if resp.StatusCode >= 400 {
+                return "", "", fmt.Errorf("create session: byparr returned HTTP %d", resp.StatusCode)
+        }
 
         // Now make the actual request with the session
         // CRITICAL: maxTimeout must be in milliseconds and sent in API request
@@ -169,6 +172,14 @@ func GetFreshCookiesViaFlareSolverr(ctx context.Context, url string) (string, st
         body, err := io.ReadAll(resp.Body)
         if err != nil {
                 return "", "", fmt.Errorf("read byparr response: %w", err)
+        }
+
+        if resp.StatusCode >= 400 {
+                bodyPreview := string(body)
+                if len(bodyPreview) > 200 {
+                        bodyPreview = bodyPreview[:200]
+                }
+                return "", "", fmt.Errorf("byparr returned HTTP %d: %s", resp.StatusCode, bodyPreview)
         }
 
         var fsResp flareSolverrResponse

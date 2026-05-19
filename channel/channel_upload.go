@@ -1,8 +1,6 @@
 package channel
 
 import (
-	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,56 +9,6 @@ import (
 	"github.com/teacat/chaturbate-dvr/server"
 	"github.com/teacat/chaturbate-dvr/uploader"
 )
-
-type recEntry struct {
-	Filename     string            `json:"filename"`
-	Timestamp    string            `json:"timestamp"`
-	RoomTitle    string            `json:"room_title"`
-	Tags         []string          `json:"tags"`
-	Viewers      int               `json:"viewers"`
-	Resolution   string            `json:"resolution"`
-	Framerate    int               `json:"framerate"`
-	Links        map[string]string `json:"links"`
-	ThumbnailURL string            `json:"thumbnail_url"`
-	SpriteURL    string            `json:"sprite_url"`
-	EmbedURL     string            `json:"embed_url"`
-	Filesize     int64             `json:"filesize"`
-}
-
-type recChannelData struct {
-	Gender     string     `json:"gender"`
-	Recordings []recEntry `json:"recordings"`
-}
-
-type recDB struct {
-	Version  int                        `json:"version"`
-	Channels map[string]*recChannelData `json:"channels"`
-}
-
-func loadRecDB() *recDB {
-	empty := &recDB{Version: 2, Channels: map[string]*recChannelData{}}
-
-	dbData := server.LoadRecordingsFromDB()
-	if dbData == nil {
-		return empty
-	}
-	var db recDB
-	if err := json.Unmarshal(dbData, &db); err != nil {
-		return empty
-	}
-	return &db
-}
-
-func saveRecDB(db *recDB) {
-	data, err := json.MarshalIndent(db, "", "  ")
-	if err != nil {
-		return
-	}
-
-	if err := server.SaveRecordingsToDB(data); err != nil {
-		fmt.Printf("[WARN] [db] could not save recordings to Supabase: %v\n", err)
-	}
-}
 
 func embedURLFromLink(host, link string) string {
 	if link == "" {
@@ -179,57 +127,6 @@ func (ch *Channel) uploadFile(filePath string, thumbURL, spriteURL string) bool 
 			dbSaved = true
 			ch.Info("upload: saved recording metadata to Supabase for %s", filename)
 		}
-
-		// Also save to JSON-based database for backward compatibility
-		server.RecMu.Lock()
-		db := loadRecDB()
-		username := ch.Config.Username
-		chanData, ok := db.Channels[username]
-		if !ok {
-			chanData = &recChannelData{Recordings: []recEntry{}}
-			db.Channels[username] = chanData
-		}
-
-		found := false
-		for i, r := range chanData.Recordings {
-			if r.Filename == filename {
-				chanData.Recordings[i].Links = links
-				if embedURL != "" {
-					chanData.Recordings[i].EmbedURL = embedURL
-				}
-				if thumbURL != "" {
-					chanData.Recordings[i].ThumbnailURL = thumbURL
-				}
-				if spriteURL != "" {
-					chanData.Recordings[i].SpriteURL = spriteURL
-				}
-				if filesize > 0 {
-					chanData.Recordings[i].Filesize = filesize
-				}
-				found = true
-				break
-			}
-		}
-		if !found {
-			entry := recEntry{
-				Filename:     filename,
-				Timestamp:    timestamp,
-				RoomTitle:    ch.RoomTitle,
-				Tags:         ch.Tags,
-				Viewers:      ch.Viewers,
-				Resolution:   ch.Resolution,
-				Framerate:    ch.Framerate,
-				Links:        links,
-				ThumbnailURL: thumbURL,
-				SpriteURL:    spriteURL,
-				EmbedURL:     embedURL,
-				Filesize:     filesize,
-			}
-			chanData.Recordings = append(chanData.Recordings, entry)
-		}
-		saveRecDB(db)
-		server.RecMu.Unlock()
-		ch.Info("upload: saved upload links to JSON database for %s", filename)
 
 		// Only delete local file if at least one DB write succeeded — prevents
 		// losing the file when Supabase is down or returns an error.

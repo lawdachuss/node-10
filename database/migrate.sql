@@ -10,6 +10,10 @@
 -- Recordings, uploads, previews, logs are shared across all instances.
 -- ============================================================================
 
+-- Ensure public schema exists and is in the search path
+CREATE SCHEMA IF NOT EXISTS public;
+SET search_path TO public;
+
 -- Enable UUID extension if not already enabled
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 

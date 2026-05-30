@@ -44,7 +44,10 @@ func New() (*Manager, error) {
 
 // SaveConfig saves the current channels to Supabase.
 func (m *Manager) SaveConfig() error {
-        var config []*entity.ChannelConfig
+        // Initialize as empty slice (not nil) so MarshalIndent produces "[]"
+        // rather than "null" when all channels are deleted. Supabase's
+        // app_settings.value column has a NOT NULL constraint.
+        config := make([]*entity.ChannelConfig, 0)
 
         m.Channels.Range(func(key, value any) bool {
                 config = append(config, value.(*channel.Channel).Config)
@@ -250,12 +253,12 @@ func (m *Manager) StopChannel(username string) error {
         }
         fmt.Printf(" INFO [manager] channel %q deleted and persisted to Supabase\n", username)
 
-	// Step 3: non-blocking cleanup — stop the ffmpeg process.
-	// The channels table row is intentionally left orphaned because it is shared
-	// across instances and no longer read by LoadChannelsFromDB.
-	go func() {
-		thing.(*channel.Channel).Stop()
-	}()
+        // Step 3: non-blocking cleanup — stop the ffmpeg process.
+        // The channels table row is intentionally left orphaned because it is shared
+        // across instances and no longer read by LoadChannelsFromDB.
+        go func() {
+                thing.(*channel.Channel).Stop()
+        }()
 
         return nil
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"flag"
+	"fmt"
 	"io/fs"
 	"log"
 	"os"
@@ -109,6 +110,20 @@ func main() {
 		MixdropEmail:      os.Getenv("MIXDROP_EMAIL"),
 		MixdropToken:      firstNonEmpty(os.Getenv("MIXDROP_TOKEN"), os.Getenv("MIXDROP_KEY")),
 		PixelDrainToken:   firstNonEmpty(os.Getenv("PIXELDRAIN_TOKEN"), os.Getenv("PIXELDRAIN_API_KEY")),
+	}
+
+	// Log presence (masked) of uploader credentials to help debugging without leaking secrets.
+	if server.Config != nil {
+		mask := func(s string) string {
+			if s == "" {
+				return "<empty>"
+			}
+			return fmt.Sprintf("<len=%d>", len(s))
+		}
+		log.Printf("uploader creds: MixdropEmail=%t MixdropToken=%s PixelDrain=%s StreamtapeLogin=%t StreamtapeKey=%s",
+			server.Config.MixdropEmail != "", mask(server.Config.MixdropToken), mask(server.Config.PixelDrainToken),
+			server.Config.StreamtapeLogin != "", mask(server.Config.StreamtapeKey),
+		)
 	}
 
 	dbClient := server.GetDBClient()

@@ -217,8 +217,8 @@ func (m *MultiHostUploader) UploadToAll(filePath string) []UploadResult {
                 }()
         }
 
-        // Upload to PixelDrain (attempt if uploader is present)
-        if m.pixeldrain != nil {
+        // Upload to PixelDrain (only if API key configured)
+        if m.pixeldrain != nil && m.pixeldrain.token != "" {
                 wg.Add(1)
                 go func() {
                         defer wg.Done()

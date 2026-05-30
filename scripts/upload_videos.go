@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/teacat/chaturbate-dvr/entity"
+	"github.com/teacat/chaturbate-dvr/channel"
 	"github.com/teacat/chaturbate-dvr/server"
 	"github.com/teacat/chaturbate-dvr/uploader"
 )
@@ -160,6 +161,16 @@ func main() {
 		}
 
 		// Construct uploader using server.Config
+		// Generate thumbnails/sprite and save preview links (requires ffmpeg/ffprobe in PATH).
+		thumbURL, spriteURL := channel.GenerateThumbnailForFile(p)
+		if thumbURL != "" || spriteURL != "" {
+			if err := server.SavePreviewLinks(filename, thumbURL, spriteURL); err != nil {
+				log.Printf("warning: failed to save preview links for %s: %v", filename, err)
+			} else {
+				log.Printf("saved previews for %s", filename)
+			}
+		}
+
 		upl := uploader.NewMultiHostUploader(
 			server.Config.TurboViPlayAPIKey,
 			server.Config.VoeSXAPIKey,

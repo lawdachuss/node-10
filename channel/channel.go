@@ -245,7 +245,6 @@ func (ch *Channel) UpdateOnlineStatus(isOnline bool) {
 func (ch *Channel) CheckOnlineWhilePaused(ctx context.Context, startSeq int) {
         client := chaturbate.NewClient()
         baseIntervalMinutes := max(server.Config.Interval, 15)
-        cfBlockCount := 0
 
         initialDelay := time.Duration(startSeq*5) * time.Second
         if initialDelay > 0 {
@@ -268,16 +267,7 @@ func (ch *Channel) CheckOnlineWhilePaused(ctx context.Context, startSeq int) {
                         if errors.Is(err, context.Canceled) {
                                 return
                         }
-                        if isCFBlock(err) {
-                                cfBlockCount++
-                                delayMinutes := cfBackoffMinutes(cfBlockCount, baseIntervalMinutes)
-                                waitInterval = time.Duration(delayMinutes) * time.Minute
-                                ch.Info("paused status check blocked by Cloudflare (attempt %d); retry in %d min(s)", cfBlockCount, delayMinutes)
-                        } else {
-                                cfBlockCount = 0
-                        }
                 } else if status != "" {
-                        cfBlockCount = 0
                         isOnline := status != chaturbate.StatusAway && status != chaturbate.StatusOffline
                         ch.stateMu.Lock()
                         changed := ch.IsOnline != isOnline || ch.RoomStatus != status

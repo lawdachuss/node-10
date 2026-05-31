@@ -24,7 +24,6 @@ func (ch *Channel) Monitor() {
         ctx, _ := ch.WithCancel(context.Background())
 
         var err error
-        cfBlockCount := 0
         for {
                 if err = ctx.Err(); err != nil {
                         break
@@ -37,18 +36,13 @@ func (ch *Channel) Monitor() {
                 onRetry := func(_ uint, err error) {
                         ch.UpdateOnlineStatus(false)
 
-                        if isCFBlock(err) {
-                                cfBlockCount++
-                                delay := cfBackoffMinutes(cfBlockCount, server.Config.Interval)
-                                ch.Info("blocked by Cloudflare (attempt %d); try with `-cookies` and `-user-agent`? try again in %d min(s)", cfBlockCount, delay)
-                        } else if errors.Is(err, internal.ErrChannelOffline) || errors.Is(err, internal.ErrPrivateStream) {
-                                cfBlockCount = 0
+                        if errors.Is(err, internal.ErrChannelOffline) || errors.Is(err, internal.ErrPrivateStream) {
                                 ch.stateMu.Lock()
                                 ch.RoomStatus = client.LastRoomStatus
                                 ch.stateMu.Unlock()
                                 ch.Update()
                                 if client.LastRoomStatus == chaturbate.StatusPublic && errors.Is(err, internal.ErrChannelOffline) {
-                                        ch.Info("channel is live but stream URL unavailable (check Byparr/cookies); try again in %d min(s)", server.Config.Interval)
+                                        ch.Info("channel is live but stream URL unavailable (check cookies); try again in %d min(s)", server.Config.Interval)
                                 } else {
                                         ch.Info("channel is %s, try again in %d min(s)", ch.RoomStatus, server.Config.Interval)
                                 }
@@ -65,20 +59,14 @@ func (ch *Channel) Monitor() {
                                 // CDN session expired mid-stream (common with LL-HLS tokens).
                                 // The current file has already been finalised by the deferred
                                 // Cleanup in RecordStream.  Just re-fetch a fresh HLS URL.
-                                cfBlockCount = 0
                                 ch.Info("stream stalled (CDN session expired) — re-fetching fresh URL in %d min(s)", server.Config.Interval)
                         } else if errors.Is(err, context.Canceled) {
-                                cfBlockCount = 0
                         } else {
-                                cfBlockCount = 0
                                 ch.Error("on retry: %s: retrying in %d min(s)", err.Error(), server.Config.Interval)
                         }
                 }
 
                 customDelay := func(_ uint, err error, _ *retry.Config) time.Duration {
-                        if isCFBlock(err) {
-                                return time.Duration(cfBackoffMinutes(cfBlockCount, server.Config.Interval)) * time.Minute
-                        }
                         return time.Duration(server.Config.Interval) * time.Minute
                 }
 
@@ -209,19 +197,6 @@ func (ch *Channel) HandleAudioInitSegment(initData []byte) error {
                 return fmt.Errorf("write audio init segment: %w", err)
         }
         return nil
-}
-
-func isCFBlock(err error) bool {
-        return errors.Is(err, internal.ErrCloudflareBlocked) || errors.Is(err, internal.ErrAgeVerification)
-}
-
-// cfBackoffMinutes returns the delay in minutes for Cloudflare block retries.
-// Uses exponential backoff: interval * 2^(n-1), capped at 30 minutes.
-// consecutiveBlocks must be >= 1.
-func cfBackoffMinutes(consecutiveBlocks, baseInterval int) int {
-        shift := min(consecutiveBlocks-1, 4) // max multiplier: 16x
-        delay := baseInterval * (1 << shift)
-        return min(delay, 30)
 }
 
 // HandleSegment processes and writes segment data to a file.

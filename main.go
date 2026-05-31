@@ -1,10 +1,12 @@
 package main
 
 import (
+        "bufio"
         "fmt"
         "log"
         "os"
         "os/signal"
+        "strings"
         "syscall"
         "time"
 
@@ -32,7 +34,35 @@ const logo = `
 
 var version = "dev"
 
+// loadDotEnv loads KEY=VALUE pairs from a .env file into the process environment,
+// but does NOT overwrite existing environment variables.
+func loadDotEnv(path string) {
+        f, err := os.Open(path)
+        if err != nil {
+                return
+        }
+        defer f.Close()
+        s := bufio.NewScanner(f)
+        for s.Scan() {
+                line := strings.TrimSpace(s.Text())
+                if line == "" || strings.HasPrefix(line, "#") {
+                        continue
+                }
+                parts := strings.SplitN(line, "=", 2)
+                if len(parts) != 2 {
+                        continue
+                }
+                k := strings.TrimSpace(parts[0])
+                v := strings.TrimSpace(parts[1])
+                v = strings.Trim(v, `"'`)
+                if os.Getenv(k) == "" {
+                        os.Setenv(k, v)
+                }
+        }
+}
+
 func main() {
+        loadDotEnv(".env")
         app := &cli.App{
                 Name:    "chaturbate-dvr",
                 Version: version,
@@ -209,12 +239,6 @@ func main() {
                                 Value:   "previews",
                         },
                         &cli.StringFlag{
-                                Name:    "flaresolverr-url",
-                                Usage:   "URL of the Byparr/FlareSolverr instance for automatic Cloudflare bypass",
-                                EnvVars: []string{"FLARESOLVERR_URL"},
-                                Value:   "",
-                        },
-                        &cli.StringFlag{
                                 Name:    "supabase-url",
                                 Usage:   "Supabase project URL for remote data persistence (REST API fallback)",
                                 EnvVars: []string{"SUPABASE_URL"},
@@ -254,11 +278,6 @@ func start(c *cli.Context) error {
                 if err := server.Manager.LoadConfig(); err != nil {
                         return fmt.Errorf("load config: %w", err)
                 }
-
-                // Start the built-in cookie-refresher (replicates the docker-compose
-                // cookie-refresher container). It calls Byparr every 30 min to obtain
-                // fresh cf_clearance cookies automatically.
-                server.Manager.StartCookieRefresher()
 
                 // Graceful shutdown: catch SIGTERM/SIGINT, stop all recording
                 // channels first (so their Cleanup() runs and queues files into

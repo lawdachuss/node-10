@@ -33,7 +33,7 @@ func PostChaturbateAPI(ctx context.Context, username, csrfToken string) (string,
 		userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 	}
 
-	req.Header.Set("User-Agent", strings.TrimSpace(userAgent))
+        req.Header.Set("User-Agent", strings.TrimSpace(userAgent))
 	req.Header.Set("Connection", "keep-alive")
 	req.Header.Set("Upgrade-Insecure-Requests", "1")
 	req.Header.Set("DNT", "1")
@@ -90,21 +90,10 @@ func PostChaturbateAPI(ctx context.Context, username, csrfToken string) (string,
 		return "", fmt.Errorf("read body: %w", err)
 	}
 
-	bodyStr := string(body)
+        bodyStr := string(body)
 
-	// Cloudflare challenge pages are HTML; API JSON responses are not CF blocks.
-	trimmed := strings.TrimSpace(bodyStr)
-	isCFBlock := !strings.HasPrefix(trimmed, "{") && (
-		strings.Contains(bodyStr, "<title>Just a moment...</title>") ||
-			strings.Contains(bodyStr, "Checking your browser") ||
-			strings.Contains(bodyStr, "cf-browser-verification"))
-
-	if isCFBlock {
-		return "", ErrCloudflareBlocked
-	}
-
-	// A plain 403 without CF markers is a private/forbidden room, not a CF block
-	if resp.StatusCode == 403 {
+        // A plain 403 is a private/forbidden room
+        if resp.StatusCode == 403 {
 		return "", fmt.Errorf("forbidden: %w", ErrPrivateStream)
 	}
 

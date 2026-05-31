@@ -108,98 +108,22 @@ func fetchAPIResponse(ctx context.Context, client *internal.Req, username string
         return &resp, nil
 }
 
-// tryFlareSolverrStream uses Byparr/FlareSolverr to obtain cookies and the HLS URL.
-// Used when Cloudflare blocks direct API access or when the room is live but no stream URL is returned.
-// If roomInfo is non-nil, it is populated with room metadata from the response.
-// Retries up to 3 times with a shared 250s timeout budget to handle transient Byparr failures.
-func tryFlareSolverrStream(ctx context.Context, username, reason string, roomInfo *APIResponse) (*Stream, string, error) {
-        fmt.Printf("[INFO] %s for %s, trying FlareSolverr/Byparr fallback...\n", reason, username)
-
-        deadline, hasDeadline := ctx.Deadline()
-        var budget time.Duration
-        if hasDeadline {
-                budget = time.Until(deadline)
-        }
-        if budget <= 0 || budget > 250*time.Second {
-                budget = 250 * time.Second
-        }
-
-        const maxAttempts = 3
-        var lastErr error
-        for attempt := range maxAttempts {
-                perAttempt := budget / time.Duration(maxAttempts-attempt)
-                attemptCtx, cancel := context.WithTimeout(ctx, perAttempt)
-
-                var fsRoomInfo internal.StreamAPIBody
-                roomInfoPtr := &fsRoomInfo
-                if roomInfo == nil {
-                        roomInfoPtr = nil
-                }
-
-                hlsURL, status, err := internal.FetchStreamViaFlareSolverr(attemptCtx, username, roomInfoPtr)
-                cancel()
-                if err == nil {
-                        if roomInfo != nil && roomInfoPtr != nil {
-                                roomInfo.RoomTitle = roomInfoPtr.RoomTitle
-                                roomInfo.Tags = roomInfoPtr.Tags
-                                roomInfo.NumUsers = roomInfoPtr.NumUsers
-                                if roomInfoPtr.BroadcasterGender != "" {
-                                        roomInfo.BroadcasterGender = roomInfoPtr.BroadcasterGender
-                                }
-                        }
-                        fmt.Printf("[SUCCESS] FlareSolverr/Byparr obtained stream info for %s\n", username)
-                        if status == "private" {
-                                return nil, status, internal.ErrPrivateStream
-                        }
-                        if status == "offline" || hlsURL == "" {
-                                return nil, status, internal.ErrChannelOffline
-                        }
-                        return &Stream{HLSSource: hlsURL}, status, nil
-                }
-                lastErr = err
-                if attempt < maxAttempts-1 {
-                        fmt.Printf("[WARN] FlareSolverr attempt %d/%d for %s failed: %v\n", attempt+1, maxAttempts, username, err)
-                        select {
-                        case <-ctx.Done():
-                                return nil, "", ctx.Err()
-                        case <-time.After(3 * time.Second):
-                        }
-                }
-        }
-        return nil, "", lastErr
-}
-
 // FetchStream retrieves the streaming data using the Chaturbate API.
 // Returns the stream, the room status string, and any error.
 // If roomInfo is non-nil, it is populated with room metadata (title, tags,
 // viewers) from whichever API call succeeded.
 func FetchStream(ctx context.Context, client *internal.Req, username string, roomInfo *APIResponse) (*Stream, string, error) {
-        // Try POST API first (faster, doesn't require FlareSolverr)
+        // Try POST API first
         csrfToken := fmt.Sprintf("%016x%016x", time.Now().UnixNano(), time.Now().UnixNano()^0xDEADBEEF)
 
         body, err := internal.PostChaturbateAPI(ctx, username, csrfToken)
         if err != nil {
-                // If Cloudflare blocked us, try FlareSolverr as fallback
-                if errors.Is(err, internal.ErrCloudflareBlocked) {
-                        stream, status, fsErr := tryFlareSolverrStream(ctx, username, "Cloudflare blocked POST API", roomInfo)
-                        if fsErr == nil {
-                                workingURL, edgeErr := findWorkingEdgeURL(ctx, client, stream.HLSSource)
-                                if edgeErr != nil {
-                                        return nil, status, edgeErr
-                                }
-                                return &Stream{HLSSource: workingURL}, status, nil
-                        }
-                        fmt.Printf("[WARN] FlareSolverr failed for %s: %v\n", username, fsErr)
-                        fmt.Printf("[WARN] Cloudflare blocked %s but bypass did not succeed\n", username)
-                }
-
-                // Try the old GET API as final fallback
+                // Try the GET API as fallback
                 resp, apiErr := fetchAPIResponse(ctx, client, username)
                 if apiErr != nil {
                         return nil, "", apiErr
                 }
 
-                // Cache room metadata from GET API
                 if roomInfo != nil {
                         roomInfo.RoomTitle = resp.RoomTitle
                         roomInfo.Tags = resp.Tags
@@ -209,7 +133,6 @@ func FetchStream(ctx context.Context, client *internal.Req, username string, roo
                         }
                 }
 
-                // Handle room status from GET API
                 switch resp.RoomStatus {
                 case StatusPrivate:
                         return nil, resp.RoomStatus, internal.ErrPrivateStream
@@ -218,24 +141,12 @@ func FetchStream(ctx context.Context, client *internal.Req, username string, roo
                 }
 
                 if resp.StreamURL() == "" {
-                        if resp.RoomStatus == StatusPublic {
-                                stream, status, fsErr := tryFlareSolverrStream(ctx, username, "GET API returned public without HLS", roomInfo)
-                                if fsErr == nil {
-                                        workingURL, edgeErr := findWorkingEdgeURL(ctx, client, stream.HLSSource)
-                                        if edgeErr != nil {
-                                                return nil, status, edgeErr
-                                        }
-                                        return &Stream{HLSSource: workingURL}, status, nil
-                                }
-                                fmt.Printf("[WARN] Byparr fallback after empty GET HLS failed for %s: %v\n", username, fsErr)
-                        }
                         return nil, resp.RoomStatus, internal.ErrChannelOffline
                 }
 
-                // Find working edge URL (geo-blocking fallback)
-                workingURL, err := findWorkingEdgeURL(ctx, client, resp.StreamURL())
-                if err != nil {
-                        return nil, resp.RoomStatus, err
+                workingURL, edgeErr := findWorkingEdgeURL(ctx, client, resp.StreamURL())
+                if edgeErr != nil {
+                        return nil, resp.RoomStatus, edgeErr
                 }
 
                 return &Stream{HLSSource: workingURL}, resp.RoomStatus, nil
@@ -247,7 +158,6 @@ func FetchStream(ctx context.Context, client *internal.Req, username string, roo
                 return nil, "", fmt.Errorf("failed to parse POST API response: %w", err)
         }
 
-        // Cache room metadata from POST API
         if roomInfo != nil {
                 roomInfo.RoomTitle = resp.RoomTitle
                 roomInfo.Tags = resp.Tags
@@ -280,7 +190,6 @@ func FetchStream(ctx context.Context, client *internal.Req, username string, roo
                 }
         }
 
-        // Handle room status
         switch resp.RoomStatus {
         case StatusPrivate:
                 return nil, resp.RoomStatus, internal.ErrPrivateStream
@@ -289,7 +198,6 @@ func FetchStream(ctx context.Context, client *internal.Req, username string, roo
         }
 
         // If POST API returned a public room but no HLS source, fall back to GET API.
-        // This happens when Chaturbate requires cookies/auth for the POST endpoint.
         if resp.StreamURL() == "" {
                 getResp, apiErr := fetchAPIResponse(ctx, client, username)
                 if apiErr == nil && getResp.StreamURL() != "" {
@@ -303,22 +211,6 @@ func FetchStream(ctx context.Context, client *internal.Req, username string, roo
                                 }
                         }
                 } else {
-                        roomStatus := resp.RoomStatus
-                        if apiErr == nil {
-                                roomStatus = getResp.RoomStatus
-                        }
-                        // Room may show as public while HLS is withheld (common on datacenter IPs / without cookies).
-                        if roomStatus == StatusPublic || resp.RoomStatus == StatusPublic {
-                                stream, status, fsErr := tryFlareSolverrStream(ctx, username, "live room but no HLS URL from API", roomInfo)
-                                if fsErr == nil {
-                                        workingURL, edgeErr := findWorkingEdgeURL(ctx, client, stream.HLSSource)
-                                        if edgeErr != nil {
-                                                return nil, status, edgeErr
-                                        }
-                                        return &Stream{HLSSource: workingURL}, status, nil
-                                }
-                                fmt.Printf("[WARN] Byparr could not obtain HLS for %s: %v\n", username, fsErr)
-                        }
                         if apiErr == nil {
                                 switch getResp.RoomStatus {
                                 case StatusPrivate:
@@ -331,10 +223,9 @@ func FetchStream(ctx context.Context, client *internal.Req, username string, roo
                 }
         }
 
-        // Find working edge URL (geo-blocking fallback)
-        workingURL, err := findWorkingEdgeURL(ctx, client, resp.StreamURL())
-        if err != nil {
-                return nil, resp.RoomStatus, err
+        workingURL, edgeErr := findWorkingEdgeURL(ctx, client, resp.StreamURL())
+        if edgeErr != nil {
+                return nil, resp.RoomStatus, edgeErr
         }
 
         return &Stream{HLSSource: workingURL}, resp.RoomStatus, nil
@@ -354,11 +245,12 @@ func findWorkingEdgeURL(ctx context.Context, client *internal.Req, hlsSource str
         if err == nil && statusCode == 200 {
                 return hlsSource, nil
         }
+        fmt.Printf("[DEBUG] findWorkingEdgeURL: original HEAD -> status=%d err=%v\n", statusCode, err)
 
         // 2. Extract current region from URL
         matches := edgeRegionRegexp.FindStringSubmatch(hlsSource)
         if len(matches) < 2 {
-                // URL doesn't match edge pattern, return original
+                fmt.Printf("[DEBUG] findWorkingEdgeURL: no edge region in URL, returning original\n")
                 return hlsSource, nil
         }
         currentRegion := matches[1]
@@ -374,9 +266,13 @@ func findWorkingEdgeURL(ctx context.Context, client *internal.Req, hlsSource str
                 if err == nil && statusCode == 200 {
                         return altURL, nil
                 }
+                fmt.Printf("[DEBUG] findWorkingEdgeURL: alt region %s -> status=%d err=%v\n", region, statusCode, err)
         }
 
-        return "", internal.ErrGeoBlocked
+        // 4. If we couldn't validate any edge, return the original URL anyway
+        //    so the recorder can try GETing it directly (HEAD may be blocked by CDN).
+        fmt.Printf("[DEBUG] findWorkingEdgeURL: all regions failed, returning original URL\n")
+        return hlsSource, nil
 }
 
 // Stream represents an HLS stream source.

@@ -76,8 +76,10 @@ type Config struct {
         Port          string
         Interval      int
         Cookies       string
+        CfClearance   string
+        SessionID     string
+        Csrftoken     string
         UserAgent     string
-        ByparrURL     string
         Domain        string
 
         OutputDir      string

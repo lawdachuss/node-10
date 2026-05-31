@@ -53,7 +53,6 @@ func New(c *cli.Context) (*entity.Config, error) {
                 GitHubRepo:        c.String("github-repo"),
                 GitHubBranch:      c.String("github-branch"),
                 GitHubPreviewPath: c.String("github-preview-path"),
-                ByparrURL:         c.String("flaresolverr-url"),
                 SupabaseURL:       c.String("supabase-url"),
                 SupabaseAPIKey:    c.String("supabase-api-key"),
         }, nil

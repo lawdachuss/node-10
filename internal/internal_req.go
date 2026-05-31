@@ -63,10 +63,6 @@ func (h *Req) GetBytes(ctx context.Context, url string) ([]byte, error) {
                 return nil, fmt.Errorf("read body: %w", err)
         }
 
-        // Check for Cloudflare protection
-        if strings.Contains(string(b), "<title>Just a moment...</title>") {
-                return nil, ErrCloudflareBlocked
-        }
         // Check for Age Verification
         if strings.Contains(string(b), "Verify your age") {
                 return nil, ErrAgeVerification
@@ -116,7 +112,7 @@ func SetRequestHeaders(req *http.Request) {
         req.Header.Set("X-Requested-With", "XMLHttpRequest") // So Cloudflare would likely accept the request, and no Age Verification
 
         if server.Config.UserAgent != "" {
-                req.Header.Set("User-Agent", server.Config.UserAgent)
+                req.Header.Set("User-Agent", strings.TrimSpace(server.Config.UserAgent))
         }
         if server.Config.Cookies != "" {
                 cookies := ParseCookies(server.Config.Cookies)

@@ -132,9 +132,11 @@ func Updates(c *gin.Context) {
 
 // UpdateConfigRequest represents the request body for updating configuration.
 type UpdateConfigRequest struct {
-        Cookies   string `json:"cookies" form:"cookies"`
+        Cookies         string `json:"cookies" form:"cookies"`
+        CfClearance     string `json:"cf_clearance" form:"cf_clearance"`
+        SessionID       string `json:"sessionid" form:"sessionid"`
+        Csrftoken       string `json:"csrftoken" form:"csrftoken"`
         UserAgent string `json:"user_agent" form:"user_agent"`
-        ByparrURL string `json:"byparr_url" form:"byparr_url"`
         StreamtapeLogin string `json:"streamtape_login" form:"streamtape_login"`
         StreamtapeKey   string `json:"streamtape_key" form:"streamtape_key"`
         MixdropEmail    string `json:"mixdrop_email" form:"mixdrop_email"`
@@ -150,11 +152,39 @@ func UpdateConfig(c *gin.Context) {
                 return
         }
 
-        if req.Cookies != "" || req.UserAgent != "" {
-                server.UpdateByparrCredentials(req.Cookies, req.UserAgent)
+        if req.Cookies != "" {
+                server.Config.Cookies = req.Cookies
         }
-        if req.ByparrURL != "" {
-                server.Config.ByparrURL = req.ByparrURL
+        if req.CfClearance != "" {
+                server.Config.CfClearance = req.CfClearance
+        }
+        if req.SessionID != "" {
+                server.Config.SessionID = req.SessionID
+        }
+        if req.Csrftoken != "" {
+                server.Config.Csrftoken = req.Csrftoken
+        }
+        if req.UserAgent != "" {
+                server.Config.UserAgent = strings.TrimSpace(strings.Map(func(r rune) rune {
+                        if r == '\n' || r == '\r' || r == '\t' || r < 32 {
+                                return -1
+                        }
+                        return r
+                }, req.UserAgent))
+        }
+
+        parts := make([]string, 0, 3)
+        if server.Config.CfClearance != "" {
+                parts = append(parts, "cf_clearance="+server.Config.CfClearance)
+        }
+        if server.Config.SessionID != "" {
+                parts = append(parts, "sessionid="+server.Config.SessionID)
+        }
+        if server.Config.Csrftoken != "" {
+                parts = append(parts, "csrftoken="+server.Config.Csrftoken)
+        }
+        if len(parts) > 0 {
+                server.Config.Cookies = strings.Join(parts, "; ")
         }
         // Update uploader credentials (Streamtape / Mixdrop / PixelDrain)
         if req.StreamtapeLogin != "" || req.StreamtapeKey != "" || req.MixdropEmail != "" || req.MixdropToken != "" || req.PixeldrainToken != "" {

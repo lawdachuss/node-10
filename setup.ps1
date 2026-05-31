@@ -139,8 +139,9 @@ if (-not $NoAppStart) {
 
     # ── Start Cloudflare tunnel in a NEW terminal window ──────────────
     Write-Host "🚇 Starting Cloudflare tunnel in a new window..." -ForegroundColor Cyan
-    $tunnelScript = @'
-$logFile = "$env:TEMP\cloudflared_tunnel_url.txt"
+    $tunnelScriptPath = Join-Path $env:TEMP "start_tunnel.ps1"
+    Set-Content -Path $tunnelScriptPath -Force -Value @'
+$logFile = Join-Path $env:TEMP "cloudflared_tunnel_url.txt"
 $p = Start-Process -FilePath "cloudflared" -ArgumentList "tunnel --url http://localhost:8080 --protocol http2" -NoNewWindow -RedirectStandardError $logFile -PassThru
 Write-Host "`n🌍 Waiting for tunnel URL..." -ForegroundColor Yellow
 $timeout = 30
@@ -165,7 +166,7 @@ if ($url) {
 }
 $p.WaitForExit()
 '@
-    Start-Process -FilePath "powershell" -ArgumentList "-NoExit", "-Command", $tunnelScript -WindowStyle Normal
+    Start-Process -FilePath "powershell" -ArgumentList "-NoExit", "-File", $tunnelScriptPath -WindowStyle Normal
 
     $dvrProc.WaitForExit()
 } else {

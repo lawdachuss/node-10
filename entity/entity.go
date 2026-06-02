@@ -30,6 +30,18 @@ type ChannelConfig struct {
 func (c *ChannelConfig) Sanitize() {
 	c.Username = regexp.MustCompile(`[^a-zA-Z0-9_-]`).ReplaceAllString(c.Username, "")
 	c.Username = strings.TrimSpace(c.Username)
+	if c.Resolution == 0 {
+		c.Resolution = 2160
+	}
+	if c.MaxDuration == 0 {
+		c.MaxDuration = 60
+	}
+	if c.Pattern == "" {
+		c.Pattern = "videos/{{.Username}}_{{.Year}}-{{.Month}}-{{.Day}}_{{.Hour}}-{{.Minute}}-{{.Second}}{{if .Sequence}}_{{.Sequence}}{{end}}"
+	}
+	if c.Framerate == 0 {
+		c.Framerate = 60
+	}
 }
 
 // ChannelInfo represents the information about a channel,
@@ -79,6 +91,7 @@ type Config struct {
 	Cookies       string
 	SessionID     string
 	Csrftoken     string
+	CfClearance   string
 	UserAgent     string
 	Domain        string
 	ProxyURL      string

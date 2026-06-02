@@ -133,15 +133,16 @@ func Updates(c *gin.Context) {
 
 // UpdateConfigRequest represents the request body for updating configuration.
 type UpdateConfigRequest struct {
-        Cookies         string `json:"cookies" form:"cookies"`
-        SessionID       string `json:"sessionid" form:"sessionid"`
-        Csrftoken       string `json:"csrftoken" form:"csrftoken"`
-        UserAgent string `json:"user_agent" form:"user_agent"`
-        StreamtapeLogin string `json:"streamtape_login" form:"streamtape_login"`
-        StreamtapeKey   string `json:"streamtape_key" form:"streamtape_key"`
-        MixdropEmail    string `json:"mixdrop_email" form:"mixdrop_email"`
-        MixdropToken    string `json:"mixdrop_token" form:"mixdrop_token"`
-        PixeldrainToken string `json:"pixeldrain_token" form:"pixeldrain_token"`
+	Cookies         string `json:"cookies" form:"cookies"`
+	SessionID       string `json:"sessionid" form:"sessionid"`
+	Csrftoken       string `json:"csrftoken" form:"csrftoken"`
+	CfClearance     string `json:"cf_clearance" form:"cf_clearance"`
+	UserAgent       string `json:"user_agent" form:"user_agent"`
+	StreamtapeLogin string `json:"streamtape_login" form:"streamtape_login"`
+	StreamtapeKey   string `json:"streamtape_key" form:"streamtape_key"`
+	MixdropEmail    string `json:"mixdrop_email" form:"mixdrop_email"`
+	MixdropToken    string `json:"mixdrop_token" form:"mixdrop_token"`
+	PixeldrainToken string `json:"pixeldrain_token" form:"pixeldrain_token"`
 }
 
 // UpdateConfig updates the server configuration from the Web UI form or API POST.
@@ -152,34 +153,50 @@ func UpdateConfig(c *gin.Context) {
                 return
         }
 
-        if req.Cookies != "" {
-                server.Config.Cookies = req.Cookies
-        }
-        if req.SessionID != "" {
-                server.Config.SessionID = req.SessionID
-        }
-        if req.Csrftoken != "" {
-                server.Config.Csrftoken = req.Csrftoken
-        }
-        if req.UserAgent != "" {
-                server.Config.UserAgent = strings.TrimSpace(strings.Map(func(r rune) rune {
-                        if r == '\n' || r == '\r' || r == '\t' || r < 32 {
-                                return -1
-                        }
-                        return r
-                }, req.UserAgent))
-        }
+	if req.Cookies != "" {
+		server.Config.Cookies = req.Cookies
+		// Parse individual fields from the raw cookie string
+		if server.Config.CfClearance == "" {
+			server.Config.CfClearance = extractCookieValue(server.Config.Cookies, "cf_clearance")
+		}
+		if server.Config.SessionID == "" {
+			server.Config.SessionID = extractCookieValue(server.Config.Cookies, "sessionid")
+		}
+		if server.Config.Csrftoken == "" {
+			server.Config.Csrftoken = extractCookieValue(server.Config.Cookies, "csrftoken")
+		}
+	}
+	if req.SessionID != "" {
+		server.Config.SessionID = req.SessionID
+	}
+	if req.Csrftoken != "" {
+		server.Config.Csrftoken = req.Csrftoken
+	}
+	if req.CfClearance != "" {
+		server.Config.CfClearance = req.CfClearance
+	}
+	if req.UserAgent != "" {
+		server.Config.UserAgent = strings.TrimSpace(strings.Map(func(r rune) rune {
+			if r == '\n' || r == '\r' || r == '\t' || r < 32 {
+				return -1
+			}
+			return r
+		}, req.UserAgent))
+	}
 
-        parts := make([]string, 0, 2)
-        if server.Config.SessionID != "" {
-                parts = append(parts, "sessionid="+server.Config.SessionID)
-        }
-        if server.Config.Csrftoken != "" {
-                parts = append(parts, "csrftoken="+server.Config.Csrftoken)
-        }
-        if len(parts) > 0 {
-                server.Config.Cookies = strings.Join(parts, "; ")
-        }
+	parts := make([]string, 0, 3)
+	if server.Config.CfClearance != "" {
+		parts = append(parts, "cf_clearance="+server.Config.CfClearance)
+	}
+	if server.Config.SessionID != "" {
+		parts = append(parts, "sessionid="+server.Config.SessionID)
+	}
+	if server.Config.Csrftoken != "" {
+		parts = append(parts, "csrftoken="+server.Config.Csrftoken)
+	}
+	if len(parts) > 0 {
+		server.Config.Cookies = strings.Join(parts, "; ")
+	}
         // Update uploader credentials (Streamtape / Mixdrop / PixelDrain)
         if req.StreamtapeLogin != "" || req.StreamtapeKey != "" || req.MixdropEmail != "" || req.MixdropToken != "" || req.PixeldrainToken != "" {
                 server.UpdateUploaderCredentials(req.StreamtapeLogin, req.StreamtapeKey, req.MixdropEmail, req.MixdropToken, req.PixeldrainToken)
@@ -193,7 +210,18 @@ func UpdateConfig(c *gin.Context) {
                 c.JSON(http.StatusOK, gin.H{"ok": true})
                 return
         }
-        c.Redirect(http.StatusFound, "/")
+	c.Redirect(http.StatusFound, "/")
+}
+
+// extractCookieValue parses a value for the given cookie name from a cookie string.
+func extractCookieValue(cookieStr, name string) string {
+	for _, pair := range strings.Split(cookieStr, ";") {
+		parts := strings.SplitN(strings.TrimSpace(pair), "=", 2)
+		if len(parts) == 2 && strings.TrimSpace(parts[0]) == name {
+			return strings.TrimSpace(parts[1])
+		}
+	}
+	return ""
 }
 
 // isPathAllowed checks whether abs is inside the videos/ directory or the

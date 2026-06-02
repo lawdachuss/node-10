@@ -13,11 +13,12 @@ var Config *entity.Config
 var configMu sync.RWMutex
 
 type persistedSettings struct {
-        Cookies         string `json:"cookies"`
-        SessionID       string `json:"sessionid,omitempty"`
-        Csrftoken       string `json:"csrftoken,omitempty"`
-        UserAgent string `json:"user_agent"`
-        StreamtapeLogin string `json:"streamtape_login,omitempty"`
+	Cookies         string `json:"cookies"`
+	SessionID       string `json:"sessionid,omitempty"`
+	Csrftoken       string `json:"csrftoken,omitempty"`
+	CfClearance     string `json:"cf_clearance,omitempty"`
+	UserAgent       string `json:"user_agent"`
+	StreamtapeLogin string `json:"streamtape_login,omitempty"`
 	StreamtapeKey   string `json:"streamtape_key,omitempty"`
 	MixdropEmail    string `json:"mixdrop_email,omitempty"`
 	MixdropToken    string `json:"mixdrop_token,omitempty"`
@@ -27,14 +28,17 @@ type persistedSettings struct {
 // SaveSettings writes the runtime cookies and user-agent to Supabase.
 func SaveSettings() error {
 	configMu.RLock()
-        s := persistedSettings{
-                Cookies:         Config.Cookies,
-                UserAgent: Config.UserAgent,
-                StreamtapeLogin:  Config.StreamtapeLogin,
-		StreamtapeKey:    Config.StreamtapeKey,
-		MixdropEmail:     Config.MixdropEmail,
-		MixdropToken:     Config.MixdropToken,
-		PixelDrainToken:  Config.PixelDrainToken,
+	s := persistedSettings{
+		Cookies:         Config.Cookies,
+		SessionID:       Config.SessionID,
+		Csrftoken:       Config.Csrftoken,
+		CfClearance:     Config.CfClearance,
+		UserAgent:       Config.UserAgent,
+		StreamtapeLogin: Config.StreamtapeLogin,
+		StreamtapeKey:   Config.StreamtapeKey,
+		MixdropEmail:    Config.MixdropEmail,
+		MixdropToken:    Config.MixdropToken,
+		PixelDrainToken: Config.PixelDrainToken,
 	}
 	configMu.RUnlock()
 
@@ -62,19 +66,22 @@ func LoadSettings() error {
 	}
 
 	configMu.Lock()
-        if s.Cookies != "" {
-                Config.Cookies = s.Cookies
-        }
-        if s.SessionID != "" {
-                Config.SessionID = s.SessionID
-        }
-        if s.Csrftoken != "" {
-                Config.Csrftoken = s.Csrftoken
-        }
-        if s.UserAgent != "" {
-                Config.UserAgent = s.UserAgent
-        }
-        if s.StreamtapeLogin != "" {
+	if s.Cookies != "" {
+		Config.Cookies = s.Cookies
+	}
+	if s.SessionID != "" {
+		Config.SessionID = s.SessionID
+	}
+	if s.Csrftoken != "" {
+		Config.Csrftoken = s.Csrftoken
+	}
+	if s.CfClearance != "" {
+		Config.CfClearance = s.CfClearance
+	}
+	if s.UserAgent != "" {
+		Config.UserAgent = s.UserAgent
+	}
+	if s.StreamtapeLogin != "" {
 		Config.StreamtapeLogin = s.StreamtapeLogin
 	}
 	if s.StreamtapeKey != "" {
@@ -86,22 +93,25 @@ func LoadSettings() error {
 	if s.MixdropToken != "" {
 		Config.MixdropToken = s.MixdropToken
 	}
-        if s.PixelDrainToken != "" {
-                Config.PixelDrainToken = s.PixelDrainToken
-        }
+	if s.PixelDrainToken != "" {
+		Config.PixelDrainToken = s.PixelDrainToken
+	}
 
-        // Parse Config.Cookies back into individual fields if they are empty.
-        if Config.Cookies != "" {
-                if Config.SessionID == "" {
-                        Config.SessionID = extractCookie(Config.Cookies, "sessionid")
-                }
-                if Config.Csrftoken == "" {
-                        Config.Csrftoken = extractCookie(Config.Cookies, "csrftoken")
-                }
-        }
-        configMu.Unlock()
+	// Parse Config.Cookies back into individual fields if they are empty.
+	if Config.Cookies != "" {
+		if Config.CfClearance == "" {
+			Config.CfClearance = extractCookie(Config.Cookies, "cf_clearance")
+		}
+		if Config.SessionID == "" {
+			Config.SessionID = extractCookie(Config.Cookies, "sessionid")
+		}
+		if Config.Csrftoken == "" {
+			Config.Csrftoken = extractCookie(Config.Cookies, "csrftoken")
+		}
+	}
+	configMu.Unlock()
 
-        return nil
+	return nil
 }
 
 func extractCookie(cookieStr, name string) string {

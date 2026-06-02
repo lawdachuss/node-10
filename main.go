@@ -98,8 +98,8 @@ func main() {
 			},
 			&cli.IntFlag{
 				Name:  "resolution",
-				Usage: "Desired resolution (e.g., 1080 for 1080p)",
-				Value: 1080,
+				Usage: "Desired resolution (e.g., 2160 for 4K)",
+				Value: 2160,
 			},
 			&cli.StringFlag{
 				Name:  "pattern",
@@ -109,7 +109,7 @@ func main() {
 			&cli.IntFlag{
 				Name:  "max-duration",
 				Usage: "Split video into segments every N minutes ('0' to disable)",
-				Value: 0,
+				Value: 60,
 			},
 			&cli.IntFlag{
 				Name:  "max-filesize",

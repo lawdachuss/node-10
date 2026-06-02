@@ -151,6 +151,7 @@ func (m *Manager) LoadConfig() error {
 	}
 
 	for _, conf := range config {
+		conf.Sanitize()
 		ch := channel.New(conf)
 		m.Channels.Store(conf.Username, ch)
 

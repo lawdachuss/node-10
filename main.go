@@ -320,10 +320,23 @@ func start(c *cli.Context) error {
 	if err != nil {
 		return fmt.Errorf("new config: %w", err)
 	}
+
+	// Load cookies from Supabase if available (overrides .env)
+	if server.Config.SupabaseURL != "" && server.Config.SupabaseAPIKey != "" {
+		fmt.Println("📦 Loading cookies from Supabase...")
+		if err := server.LoadSettings(); err != nil {
+			fmt.Printf("⚠️  Failed to load cookies from Supabase: %v\n", err)
+			fmt.Println("   Falling back to .env cookies")
+		} else {
+			fmt.Println("✅ Cookies loaded from Supabase")
+		}
+	}
+
 	if server.Config.Cookies == "" || server.Config.UserAgent == "" {
-		fmt.Println("⚠️  Chaturbate API requests may fail — COOKIES and USER_AGENT not set in .env")
+		fmt.Println("⚠️  Chaturbate API requests may fail — COOKIES and USER_AGENT not set in .env or Supabase")
 		fmt.Println("   Open .env and fill in your browser cookies from chaturbate.com:")
 		fmt.Println("   Chrome 146: F12 → Application → Cookies → chaturbate.com → copy all as string")
+		fmt.Println("   OR update cookies in Supabase via the web UI")
 		fmt.Println("   IMPORTANT: Use Chrome 146+ on Windows for cookie collection so the TLS")
 		fmt.Println("   fingerprint matches the httpcloak preset.")
 		fmt.Println()

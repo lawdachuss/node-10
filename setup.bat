@@ -33,8 +33,11 @@ if %ERRORLEVEL% NEQ 0 (
     where ffmpeg >nul 2>nul
     if !ERRORLEVEL! NEQ 0 (
         set "WINGET_FOUND="
-        for /r "%LOCALAPPDATA%\Microsoft\WinGet\Packages\Gyan.FFmpeg.Essentials" %%f in (ffmpeg.exe) do (
+        for /f "delims=" %%f in ('dir /s /b "%LOCALAPPDATA%\Microsoft\WinGet\Packages\Gyan.FFmpeg.Essentials*\ffmpeg.exe" 2^>nul') do (
             if exist "%%f" set "WINGET_FOUND=%%~dpf"
+        )
+        if not defined WINGET_FOUND (
+            if exist "%LOCALAPPDATA%\Microsoft\WinGet\Links\ffmpeg.exe" for %%f in ("%LOCALAPPDATA%\Microsoft\WinGet\Links\ffmpeg.exe") do set "WINGET_FOUND=%%~dpf"
         )
         if defined WINGET_FOUND (
             echo   Found ffmpeg at: !WINGET_FOUND!

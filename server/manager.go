@@ -2,6 +2,7 @@ package server
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/teacat/chaturbate-dvr/entity"
 )
@@ -22,4 +23,8 @@ type IManager interface {
 	WaitForUploads()
 	StopAllChannels()
 	WaitForAllChannels()
+	StopWatcher()
+	StartSession(duration time.Duration)
+	StartWatcher()
+	IsFileUploadInFlight(filePath string) bool
 }

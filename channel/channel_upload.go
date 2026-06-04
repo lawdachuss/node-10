@@ -22,11 +22,6 @@ func embedURLFromLink(host, link string) string {
 		if code != "" {
 			return "https://voe.sx/e/" + code
 		}
-	case "Byse":
-		code := link[strings.LastIndex(link, "/")+1:]
-		if code != "" {
-			return "https://filemoon.sx/e/" + code
-		}
 	case "Streamtape":
 		return link
 	case "Mixdrop":
@@ -61,6 +56,11 @@ func (ch *Channel) uploadFile(filePath string, thumbURL, spriteURL, previewURL s
 	filename := filepath.Base(filePath)
 	ch.Info("upload: starting upload of %s", filename)
 
+	if _, err := os.Stat(filePath); err != nil {
+		ch.Error("upload: file not found %s: %v — skipping upload", filename, err)
+		return false
+	}
+
 	// Compute file hash for upload journal
 	fileHash, hashErr := internal.FastFileHash(filePath)
 	if hashErr != nil {
@@ -80,8 +80,6 @@ func (ch *Channel) uploadFile(filePath string, thumbURL, spriteURL, previewURL s
 	// Create the uploader with the channel as its logger
 	upl := uploader.NewMultiHostUploader(
 		cfg.VoeSXAPIKey,
-		cfg.SendCMAPIKey,
-		cfg.ByseAPIKey,
 		cfg.StreamtapeLogin,
 		cfg.StreamtapeKey,
 		cfg.MixdropEmail,
@@ -153,6 +151,7 @@ func (ch *Channel) uploadFile(filePath string, thumbURL, spriteURL, previewURL s
 
 	if len(results) > 0 {
 		ch.Info("upload: finished — %d/%d hosts succeeded", len(success), len(allHosts))
+		results = deduplicateResults(results)
 		for _, r := range results {
 			if r.Error != nil {
 				ch.Error("upload: [%s] failed: %s", r.Host, r.Error.Error())
@@ -242,6 +241,26 @@ func (ch *Channel) uploadFile(filePath string, thumbURL, spriteURL, previewURL s
 	}
 
 	return len(success) > 0
+}
+
+// deduplicateResults returns a slice where each host appears at most once.
+// When a host has multiple results (e.g. failed on attempt 1, succeeded on
+// attempt 2), the latest result wins.  This prevents misleading log output
+// like "[GoFile] failed" followed by "[GoFile] done" for the same file.
+func deduplicateResults(results []uploader.UploadResult) []uploader.UploadResult {
+	latest := make(map[string]uploader.UploadResult, len(results))
+	order := make([]string, 0, len(results))
+	for _, r := range results {
+		if _, exists := latest[r.Host]; !exists {
+			order = append(order, r.Host)
+		}
+		latest[r.Host] = r
+	}
+	deduped := make([]uploader.UploadResult, len(order))
+	for i, host := range order {
+		deduped[i] = latest[host]
+	}
+	return deduped
 }
 
 // failedHostNames returns the deduplicated names of hosts that failed or were

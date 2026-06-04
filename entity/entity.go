@@ -4,6 +4,7 @@ import (
 	"regexp"
 	"strings"
 	"sync/atomic"
+	"time"
 )
 
 // Event represents the type of event for the channel.
@@ -107,8 +108,6 @@ type Config struct {
 	MaxLocalAgeDays         int  // delete local files older than N days if uploaded (0 = disabled)
 
 	VoeSXAPIKey       string
-	SendCMAPIKey      string
-	ByseAPIKey        string
 	StreamtapeLogin   string
 	StreamtapeKey     string
 	MixdropEmail      string
@@ -124,4 +123,7 @@ type Config struct {
 	SupabaseAPIKey string
 
 	FFmpegPath string
+
+	SessionDuration string // recording session length (e.g. "5h20m0s"); empty = disabled (continuous recording)
+	SessionDurationParsed time.Duration // parsed from SessionDuration; 0 = disabled
 }

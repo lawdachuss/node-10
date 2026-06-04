@@ -353,7 +353,16 @@ func FetchPlaylist(ctx context.Context, hlsSource string, resolution, framerate 
 
 func fetchPlaylistSource(ctx context.Context, hlsSource string) (string, string, error) {
 	client := internal.NewReq()
-	resp, err := client.Get(ctx, hlsSource)
+	resp, err := retry.DoWithData(
+		func() (string, error) {
+			return client.Get(ctx, hlsSource)
+		},
+		retry.Context(ctx),
+		retry.Attempts(3),
+		retry.Delay(500*time.Millisecond),
+		retry.MaxDelay(3*time.Second),
+		retry.DelayType(retry.BackOffDelay),
+	)
 	if err == nil {
 		return resp, hlsSource, nil
 	}
@@ -613,9 +622,40 @@ func pickPollInterval(current, candidate time.Duration) time.Duration {
 }
 
 func (p *Playlist) processMediaPlaylist(ctx context.Context, client *internal.Req, playlistURL string, handler WatchHandler, initHandler InitHandler, lastSeq *int, initWritten *bool) (time.Duration, error) {
-	resp, err := client.Get(ctx, playlistURL)
+	originalURL := playlistURL
+	resp, err := retry.DoWithData(
+		func() (string, error) {
+			return client.Get(ctx, playlistURL)
+		},
+		retry.Context(ctx),
+		retry.Attempts(3),
+		retry.Delay(500*time.Millisecond),
+		retry.MaxDelay(3*time.Second),
+		retry.DelayType(retry.BackOffDelay),
+	)
 	if err != nil {
-		return 0, fmt.Errorf("get playlist: %w", err)
+		// All retries on the original edge failed (e.g. SOCKS5 proxy
+		// cannot route to that specific edge).  Try alternate CDN edge
+		// regions before giving up, since a different datacentre may
+		// be reachable through the same proxy.
+		for _, altURL := range alternateEdgeURLs(playlistURL) {
+			altResp, altErr := client.Get(ctx, altURL)
+			if altErr == nil {
+				playlistURL = altURL
+				resp = altResp
+				err = nil
+				break
+			}
+		}
+		if err != nil {
+			return 0, fmt.Errorf("get playlist after 3 retries: %w", err)
+		}
+		// Persist the working alternate edge for subsequent poll cycles.
+		if p.PlaylistURL == originalURL {
+			p.PlaylistURL = playlistURL
+		} else if p.AudioPlaylistURL == originalURL {
+			p.AudioPlaylistURL = playlistURL
+		}
 	}
 	pl, _, err := m3u8.DecodeFrom(strings.NewReader(resp), true)
 	if err != nil {

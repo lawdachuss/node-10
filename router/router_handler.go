@@ -7,7 +7,6 @@ import (
         "io"
         "mime"
         "net/http"
-        "net/url"
         "os"
         "path/filepath"
         "sort"
@@ -36,12 +35,6 @@ type hostPlayer struct {
         EmbedURL string `json:"embedUrl,omitempty"`
         VideoURL string `json:"videoUrl,omitempty"`
 }
-
-var (
-        byseEmbedDomainMu        sync.RWMutex
-        byseEmbedDomain          string
-        byseEmbedDomainFetchedAt time.Time
-)
 
 // Index renders the index page with channel information.
 func Index(c *gin.Context) {
@@ -154,6 +147,7 @@ func UpdateConfig(c *gin.Context) {
                 return
         }
 
+	server.ConfigMu.Lock()
 	if req.Cookies != "" {
 		server.Config.Cookies = req.Cookies
 		// Parse individual fields from the raw cookie string
@@ -198,6 +192,8 @@ func UpdateConfig(c *gin.Context) {
 	if len(parts) > 0 {
 		server.Config.Cookies = strings.Join(parts, "; ")
 	}
+	server.ConfigMu.Unlock()
+
         // Update uploader credentials (Streamtape / Mixdrop / PixelDrain)
         if req.StreamtapeLogin != "" || req.StreamtapeKey != "" || req.MixdropEmail != "" || req.MixdropToken != "" || req.PixeldrainToken != "" {
                 server.UpdateUploaderCredentials(req.StreamtapeLogin, req.StreamtapeKey, req.MixdropEmail, req.MixdropToken, req.PixeldrainToken)
@@ -325,6 +321,10 @@ func Play(c *gin.Context) {
                 c.AbortWithStatus(http.StatusBadRequest)
                 return
         }
+        if !isPathAllowed(abs) {
+                c.AbortWithStatus(http.StatusForbidden)
+                return
+        }
         file, err := os.Open(abs)
         if err != nil {
                 c.AbortWithStatus(http.StatusNotFound)
@@ -428,6 +428,10 @@ func VideoDetail(c *gin.Context) {
                 c.Redirect(http.StatusFound, "/videos")
                 return
         }
+        if !isPathAllowed(abs) {
+                c.Redirect(http.StatusFound, "/videos")
+                return
+        }
 
         filename := filepath.Base(abs)
         username := extractUsername(filename)
@@ -469,10 +473,7 @@ func VideoDetail(c *gin.Context) {
                                         viewers = rec.Viewers
                                         gender = chanData.Gender
                                         filesize = rec.Filesize
-                                        embedURL = rec.EmbedURL
-                                        if strings.Contains(strings.ToLower(embedURL), "byse.sx/e/") {
-                                                embedURL = ""
-                                        }
+					embedURL = rec.EmbedURL
 					dbThumbnailURL = rec.ThumbnailURL
 					dbSpriteURL = rec.SpriteURL
 					dbPreviewURL = rec.PreviewURL
@@ -528,11 +529,7 @@ func VideoDetail(c *gin.Context) {
 		previewURL = dbPreviewURL
 	}
 
-        byseAPIKey := ""
-        if server.Config != nil {
-                byseAPIKey = server.Config.ByseAPIKey
-        }
-        hostPlayers := buildHostPlayers(links, byseAPIKey)
+        hostPlayers := buildHostPlayers(links)
 
         // If embed URL is empty, try to generate one from upload links
         if embedURL == "" {
@@ -609,7 +606,7 @@ func VideoDetail(c *gin.Context) {
 	})
 }
 
-func buildHostPlayers(links map[string]string, byseAPIKey string) []hostPlayer {
+func buildHostPlayers(links map[string]string) []hostPlayer {
         if len(links) == 0 {
                 return nil
         }
@@ -626,32 +623,20 @@ func buildHostPlayers(links map[string]string, byseAPIKey string) []hostPlayer {
                 players = append(players, hostPlayer{
                         Host:     host,
                         Link:     link,
-                        EmbedURL: embedURLForHostLink(host, link, byseAPIKey),
+                        EmbedURL: embedURLForHostLink(host, link),
                         VideoURL: videoURLForHostLink(host, link),
                 })
         }
         return players
 }
 
-func embedURLForHostLink(host, link, byseAPIKey string) string {
+func embedURLForHostLink(host, link string) string {
         if link == "" {
                 return ""
         }
         normalizedHost := strings.ToLower(host)
         normalizedLink := strings.ToLower(link)
 
-        // Handle both Byse download URLs (/d/) and embed URLs (/e/)
-        if strings.Contains(normalizedHost, "byse") || 
-           strings.Contains(normalizedLink, "byse.sx/d/") || 
-           strings.Contains(normalizedLink, "byse.sx/e/") ||
-           strings.Contains(normalizedLink, "api.byse.sx/e/") {
-                if code := extractFileCode(link); code != "" {
-                        return byseEmbedURL(code, byseAPIKey)
-                }
-        }
-        if strings.Contains(normalizedHost, "sendcm") || strings.Contains(normalizedLink, "send.cm/") || strings.Contains(normalizedLink, "send.now/") {
-                return ""
-        }
         if strings.Contains(normalizedHost, "voe") || strings.Contains(normalizedLink, "voe.sx/") {
                 if code := extractFileCode(link); code != "" {
                         return "https://voe.sx/e/" + code
@@ -678,71 +663,6 @@ func embedURLForHostLink(host, link, byseAPIKey string) string {
         return ""
 }
 
-func byseEmbedURL(fileCode, apiKey string) string {
-        if domain := byseEmbedDomainForKey(apiKey); domain != "" {
-                return "https://" + strings.Trim(domain, "/") + "/e/" + fileCode
-        }
-        // Fallback to filemoon.sx (the old Byse domain) if API call fails
-        // Note: api.byse.sx is for API calls, not for embedding videos
-        return "https://filemoon.sx/e/" + fileCode
-}
-
-func byseEmbedDomainForKey(apiKey string) string {
-        if apiKey == "" {
-                return ""
-        }
-
-        byseEmbedDomainMu.RLock()
-        if byseEmbedDomain != "" && time.Since(byseEmbedDomainFetchedAt) < time.Hour {
-                domain := byseEmbedDomain
-                byseEmbedDomainMu.RUnlock()
-                return domain
-        }
-        byseEmbedDomainMu.RUnlock()
-
-        byseEmbedDomainMu.Lock()
-        defer byseEmbedDomainMu.Unlock()
-        if byseEmbedDomain != "" && time.Since(byseEmbedDomainFetchedAt) < time.Hour {
-                return byseEmbedDomain
-        }
-
-        reqURL := "https://api.byse.sx/get/domain?key=" + url.QueryEscape(apiKey)
-        client := &http.Client{Timeout: 5 * time.Second}
-        resp, err := client.Get(reqURL)
-        if err != nil {
-                fmt.Printf("Byse: failed to fetch embed domain: %v\n", err)
-                return ""
-        }
-        defer resp.Body.Close()
-        if resp.StatusCode != http.StatusOK {
-                fmt.Printf("Byse: embed domain API returned status %d\n", resp.StatusCode)
-                return ""
-        }
-
-        var data struct {
-                NewDomain string `json:"new_domain"`
-                OldDomain string `json:"old_domain"`
-                Status    int    `json:"status"`
-        }
-        if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-                fmt.Printf("Byse: failed to decode embed domain response: %v\n", err)
-                return ""
-        }
-        if data.Status != http.StatusOK {
-                fmt.Printf("Byse: embed domain API returned status code %d in response\n", data.Status)
-                return ""
-        }
-        if data.NewDomain == "" {
-                fmt.Printf("Byse: embed domain API returned empty new_domain (old_domain: %s)\n", data.OldDomain)
-                return ""
-        }
-
-        byseEmbedDomain = strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(data.NewDomain), "https://"), "http://")
-        byseEmbedDomainFetchedAt = time.Now()
-        fmt.Printf("Byse: using embed domain: %s\n", byseEmbedDomain)
-        return byseEmbedDomain
-}
-
 func videoURLForHostLink(host, link string) string {
         if link == "" {
                 return ""
@@ -752,18 +672,11 @@ func videoURLForHostLink(host, link string) string {
         normalizedLink := strings.ToLower(link)
 
         switch {
-        case strings.Contains(normalizedHost, "byse") || strings.Contains(normalizedLink, "byse.sx/") || strings.Contains(normalizedLink, "filemoon.sx/"):
-                if code := extractFileCode(link); code != "" {
-                        return "https://filemoon.sx/e/" + code
-                }
-                return link
         case strings.Contains(normalizedHost, "voe") || strings.Contains(normalizedLink, "voe.sx/"):
                 if code := extractFileCode(link); code != "" {
                         return "https://voe.sx/e/" + code
                 }
                 return link
-	case strings.Contains(normalizedHost, "sendcm") || strings.Contains(normalizedLink, "send.now/"):
-		return ""
         case strings.Contains(normalizedHost, "streamtape") || strings.Contains(normalizedLink, "streamtape.com/"):
                 if code := extractFileCode(link); code != "" {
                         return "https://streamtape.com/e/" + code + "/"
@@ -918,6 +831,11 @@ func RetryOrphan(c *gin.Context) {
 	results := make([]result, len(req.Paths))
 	var wg sync.WaitGroup
 	for i, path := range req.Paths {
+		abs, err := filepath.Abs(path)
+		if err != nil || !isPathAllowed(abs) {
+			results[i] = result{Path: path, Status: "failed", Error: "path not allowed"}
+			continue
+		}
 		wg.Add(1)
 		go func(idx int, p string) {
 			defer wg.Done()
@@ -958,7 +876,16 @@ func DeleteOrphans(c *gin.Context) {
 	deleted := 0
 	var errors []string
 	for _, path := range req.Paths {
-		if err := os.Remove(path); err != nil {
+		abs, err := filepath.Abs(path)
+		if err != nil {
+			errors = append(errors, fmt.Sprintf("%s: bad path", path))
+			continue
+		}
+		if !isPathAllowed(abs) {
+			errors = append(errors, fmt.Sprintf("%s: path not allowed", path))
+			continue
+		}
+		if err := os.Remove(abs); err != nil {
 			errors = append(errors, fmt.Sprintf("%s: %v", path, err))
 		} else {
 			deleted++

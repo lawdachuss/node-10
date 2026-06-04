@@ -107,8 +107,7 @@ func isSidecar(name string) bool {
 		strings.HasSuffix(name, ".thumb") ||
 		strings.HasSuffix(name, ".sprite") ||
 		strings.Contains(name, ".video.") ||
-		strings.Contains(name, ".audio.") ||
-		strings.Contains(name, ".muxed.")
+		strings.Contains(name, ".audio.")
 }
 
 // Start begins watching for new files. It blocks until the context is done.
@@ -196,6 +195,11 @@ func (fw *FileWatcher) processFile(filePath string) {
 
 	// File might have been deleted since the event
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		return
+	}
+
+	// Skip if the channel system is currently uploading this file
+	if channel.IsUploadInFlight(filePath) {
 		return
 	}
 

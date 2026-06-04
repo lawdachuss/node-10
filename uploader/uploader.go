@@ -70,8 +70,6 @@ type UploadResult struct {
 type MultiHostUploader struct {
 	gofile     *GoFileUploader
 	voesx      *VoeSXUploader
-	sendcm     *SendCMUploader
-	byse       *ByseUploader
 	streamtape *StreamtapeUploader
 	mixdrop    *MixdropUploader
 	pixeldrain *PixeldrainUploader
@@ -90,12 +88,6 @@ func (m *MultiHostUploader) initHosts() {
 	if m.voesx != nil && m.voesx.apiKey != "" {
 		m.hosts["VOE.sx"] = m.voesx.Upload
 	}
-	if m.sendcm != nil {
-		m.hosts["SendCM"] = m.sendcm.Upload
-	}
-	if m.byse != nil && m.byse.apiKey != "" {
-		m.hosts["Byse"] = m.byse.Upload
-	}
 	if m.streamtape != nil && m.streamtape.login != "" && m.streamtape.key != "" {
 		m.hosts["Streamtape"] = m.streamtape.Upload
 	}
@@ -108,15 +100,13 @@ func (m *MultiHostUploader) initHosts() {
 }
 
 // NewMultiHostUploader creates a new multi-host uploader
-func NewMultiHostUploader(voeSXAPIKey, sendCMAPIKey, byseAPIKey, streamtapeLogin, streamtapeKey, mixdropEmail, mixdropToken, pixeldrainToken string, log Logger) *MultiHostUploader {
+func NewMultiHostUploader(voeSXAPIKey, streamtapeLogin, streamtapeKey, mixdropEmail, mixdropToken, pixeldrainToken string, log Logger) *MultiHostUploader {
         if log == nil {
                 log = &nilLogger{}
         }
         return &MultiHostUploader{
                 gofile:     NewGoFileUploader(),
                 voesx:      NewVoeSXUploader(voeSXAPIKey),
-                sendcm:     NewSendCMUploader(sendCMAPIKey),
-                byse:       NewByseUploader(byseAPIKey),
                 streamtape: NewStreamtapeUploader(streamtapeLogin, streamtapeKey),
                 mixdrop:    NewMixdropUploader(mixdropEmail, mixdropToken),
                 pixeldrain: NewPixeldrainUploader(pixeldrainToken),

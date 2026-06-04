@@ -104,8 +104,6 @@ func main() {
 		SupabaseURL:       os.Getenv("SUPABASE_URL"),
 		SupabaseAPIKey:    os.Getenv("SUPABASE_API_KEY"),
 		VoeSXAPIKey:       os.Getenv("VOESX_API_KEY"),
-		SendCMAPIKey:      os.Getenv("SENDCM_API_KEY"),
-		ByseAPIKey:        os.Getenv("BYSE_API_KEY"),
 		StreamtapeLogin:   os.Getenv("STREAMTAPE_LOGIN"),
 		StreamtapeKey:     os.Getenv("STREAMTAPE_KEY"),
 		MixdropEmail:      os.Getenv("MIXDROP_EMAIL"),
@@ -189,8 +187,6 @@ func main() {
 
 		upl := uploader.NewMultiHostUploader(
 			server.Config.VoeSXAPIKey,
-			server.Config.SendCMAPIKey,
-			server.Config.ByseAPIKey,
 			server.Config.StreamtapeLogin,
 			server.Config.StreamtapeKey,
 			server.Config.MixdropEmail,

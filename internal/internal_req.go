@@ -92,6 +92,7 @@ func (h *Req) Get(ctx context.Context, url string) (string, error) {
 func (h *Req) GetBytes(ctx context.Context, url string) ([]byte, error) {
 	req, cancel, err := CreateRequest(ctx, url)
 	if err != nil {
+		cancel()
 		return nil, fmt.Errorf("new request: %w", err)
 	}
 	defer cancel()
@@ -116,7 +117,15 @@ func (h *Req) GetBytes(ctx context.Context, url string) ([]byte, error) {
 		return nil, fmt.Errorf("forbidden: %w", ErrPrivateStream)
 	}
 
-	return b, err
+	if resp.StatusCode != http.StatusOK {
+		snippet := string(b)
+		if len(snippet) > 200 {
+			snippet = snippet[:200]
+		}
+		return nil, fmt.Errorf("unexpected HTTP %d: %s", resp.StatusCode, snippet)
+	}
+
+	return b, nil
 }
 
 // Head sends an HTTP HEAD request and returns the status code.

@@ -142,6 +142,11 @@ func freeDiskSpace(targetPercent, currentPercent int) (int, error) {
 			}
 			path := filepath.Join(dir, name)
 
+			// Skip files that are currently being uploaded (in-flight).
+			if Manager != nil && Manager.IsFileUploadInFlight(path) {
+				continue
+			}
+
 			// Only consider files that have a recording entry in Supabase
 			// (meaning they were successfully uploaded at some point).
 			if !isRecordingUploaded(name) {

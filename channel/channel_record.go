@@ -48,12 +48,13 @@ func (ch *Channel) Monitor() {
 				ch.IsOnline = false
 				ch.IsConnecting = false
 				ch.RoomStatus = client.LastRoomStatus
+				roomStatus := ch.RoomStatus
 				ch.stateMu.Unlock()
 				ch.Update()
 				if client.LastRoomStatus == chaturbate.StatusPublic && errors.Is(err, internal.ErrChannelOffline) {
 					ch.Info("channel is live but stream URL unavailable (check cookies); try again in %d min(s)", server.Config.Interval)
 				} else {
-					ch.Info("channel is %s, try again in %d min(s)", ch.RoomStatus, server.Config.Interval)
+					ch.Info("channel is %s, try again in %d min(s)", roomStatus, server.Config.Interval)
 				}
 
 				// NOTE: no extra Cleanup call here.
@@ -129,6 +130,8 @@ func (ch *Channel) Update() {
 	}
 }
 
+const defaultGracePeriod = 3 * time.Minute // how long to wait before finalising a recording on transient errors
+
 // RecordStream records the stream of the channel using the provided client.
 // It retrieves the stream information and starts watching the segments.
 func (ch *Channel) RecordStream(ctx context.Context, client *chaturbate.Client) error {
@@ -197,11 +200,111 @@ func (ch *Channel) RecordStream(ctx context.Context, client *chaturbate.Client) 
 		ch.Info("status: room title: %s", title)
 	}
 
-	return playlist.WatchAVSegments(ctx, ch.HandleSegment, ch.HandleInitSegment, ch.HandleAudioSegment, ch.HandleAudioInitSegment, ch.OnPollComplete)
+	return ch.watchWithGrace(ctx, client, playlist)
+}
+
+// watchWithGrace wraps WatchAVSegments with a grace period so that transient
+// errors (CDN token expiry, network blips, brief API hiccups) do not finalise
+// the recording prematurely.  Instead of returning the error immediately
+// (which triggers Cleanup → mux → upload of a short file), the function polls
+// the Chaturbate API every 30s for up to defaultGracePeriod.  If the channel
+// comes back online within that window, a fresh HLS playlist URL is obtained
+// and WatchAVSegments resumes writing to the same file.  Only after the grace
+// period expires does the error propagate to the deferred Cleanup.
+func (ch *Channel) watchWithGrace(ctx context.Context, client *chaturbate.Client, p *chaturbate.Playlist) error {
+	const pollInterval = 30 * time.Second
+
+	origErr := ch.watchLoop(ctx, client, p)
+	if origErr == nil {
+		return nil
+	}
+	if errors.Is(origErr, context.Canceled) || errors.Is(origErr, context.DeadlineExceeded) {
+		return origErr
+	}
+
+	ch.Info("recording: segment fetch interrupted (%s); %s grace period starts", origErr, defaultGracePeriod)
+
+	deadline := time.Now().Add(defaultGracePeriod)
+	for time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(pollInterval):
+		}
+
+		stream, apiErr := client.GetStream(ctx, ch.Config.Username)
+		if apiErr != nil {
+			ch.Info("recording: API still unavailable (%s); %s remaining", apiErr, time.Until(deadline).Round(time.Second))
+			continue
+		}
+
+		newPlaylist, apiErr := stream.GetPlaylist(ctx, ch.Config.Resolution, ch.Config.Framerate)
+		if apiErr != nil {
+			continue
+		}
+
+		ch.Info("recording: channel back online — resuming with fresh playlist")
+
+		ch.stateMu.Lock()
+		ch.RoomStatus = chaturbate.StatusPublic
+		ch.stateMu.Unlock()
+		ch.UpdateOnlineStatus(true)
+
+		// Verify the playlist covers the same quality before proceeding.
+		ch.Resolution = fmt.Sprintf("%dp", newPlaylist.Resolution)
+		ch.Framerate = newPlaylist.Framerate
+
+		// Re-enter WatchAVSegments with the fresh URL.  Init handlers are
+		// idempotent — they skip the write when ch.InitSegment is already set.
+		loopErr := ch.watchLoop(ctx, client, newPlaylist)
+		if loopErr == nil {
+			return nil
+		}
+		if errors.Is(loopErr, context.Canceled) || errors.Is(loopErr, context.DeadlineExceeded) {
+			return loopErr
+		}
+
+		ch.Info("recording: segment fetch interrupted again during grace period (%s)", loopErr)
+	}
+
+	ch.Info("recording: grace period expired — finalizing file")
+	return fmt.Errorf("channel offline after grace period: %w", origErr)
+}
+
+// watchLoop is a thin wrapper around WatchAVSegments that handles the common
+// stall-detection error by obtaining a fresh HLS URL and retrying immediately
+// (without entering the full grace period).  Higher-level errors fall through
+// to the grace-period loop in watchWithGrace.
+func (ch *Channel) watchLoop(ctx context.Context, client *chaturbate.Client, p *chaturbate.Playlist) error {
+	err := p.WatchAVSegments(ctx, ch.HandleSegment, ch.HandleInitSegment, ch.HandleAudioSegment, ch.HandleAudioInitSegment, ch.OnPollComplete)
+	if err != nil && errors.Is(err, internal.ErrStreamStalled) {
+		ch.Info("recording: CDN session expired — fetching fresh playlist URL")
+		stream, apiErr := client.GetStream(ctx, ch.Config.Username)
+		if apiErr != nil {
+			return apiErr
+		}
+		newPlaylist, apiErr := stream.GetPlaylist(ctx, ch.Config.Resolution, ch.Config.Framerate)
+		if apiErr != nil {
+			return apiErr
+		}
+		ch.Resolution = fmt.Sprintf("%dp", newPlaylist.Resolution)
+		ch.Framerate = newPlaylist.Framerate
+		ch.stateMu.Lock()
+		ch.RoomStatus = chaturbate.StatusPublic
+		ch.stateMu.Unlock()
+		ch.UpdateOnlineStatus(true)
+		return ch.watchLoop(ctx, client, newPlaylist)
+	}
+	return err
 }
 
 // HandleInitSegment stores the fMP4 init segment and writes it to the file.
+// On subsequent calls (e.g. after a grace-period reconnect with a fresh CDN
+// session), the write is skipped because the moov atom is already in the file.
 func (ch *Channel) HandleInitSegment(initData []byte) error {
+	if ch.InitSegment != nil {
+		return nil
+	}
 	ch.InitSegment = initData
 
 	if ch.File == nil {
@@ -219,16 +322,24 @@ func (ch *Channel) HandleInitSegment(initData []byte) error {
 }
 
 // HandleAudioInitSegment stores the fMP4 audio init segment and writes it to the file.
+// On subsequent calls (e.g. after a grace-period reconnect) the write is skipped.
 func (ch *Channel) HandleAudioInitSegment(initData []byte) error {
+	if ch.AudioInitSegment != nil {
+		return nil
+	}
 	ch.AudioInitSegment = initData
 
 	if ch.AudioFile == nil {
 		return nil
 	}
 
-	if _, err := ch.AudioFile.Write(initData); err != nil {
+	n, err := ch.AudioFile.Write(initData)
+	if err != nil {
 		return fmt.Errorf("write audio init segment: %w", err)
 	}
+	ch.stateMu.Lock()
+	ch.Filesize += n
+	ch.stateMu.Unlock()
 	return nil
 }
 
@@ -236,6 +347,10 @@ func (ch *Channel) HandleAudioInitSegment(initData []byte) error {
 func (ch *Channel) HandleSegment(b []byte, duration float64) error {
 	if ch.Config.IsPaused.Load() {
 		return retry.Unrecoverable(internal.ErrPaused)
+	}
+
+	if ch.File == nil {
+		return fmt.Errorf("HandleSegment: ch.File is nil")
 	}
 
 	n, err := ch.File.Write(b)

@@ -1,6 +1,7 @@
 package channel
 
 import (
+        "context"
         "fmt"
         "io"
         "os"
@@ -8,6 +9,7 @@ import (
         "strings"
         "sync"
         "sync/atomic"
+        "time"
 
         "github.com/Eyevinn/mp4ff/mp4"
         "github.com/teacat/chaturbate-dvr/config"
@@ -49,9 +51,9 @@ var availableEncoders = []videoEncoder{
 
 // detectEncoder finds the best available encoder
 func detectEncoder() (videoEncoder, string) {
-        config.AcquireFFmpeg()
-        defer config.ReleaseFFmpeg()
-        for _, enc := range availableEncoders {
+	config.AcquireFFmpegHeavy()
+	defer config.ReleaseFFmpegHeavy()
+	for _, enc := range availableEncoders {
                 // Test if encoder is available by running ffmpeg with it
                 cmd := config.FFmpegCommand("-hide_banner", "-f", "lavfi", "-i", "nullsrc=s=256x256:d=1", "-c:v", enc.codec, "-f", "null", "-")
                 if err := cmd.Run(); err == nil {
@@ -110,9 +112,9 @@ func (ch *Channel) CompressFile(srcPath string) {
                 args = append(args, encoder.args...)
                 args = append(args, "-c:a", "aac", "-b:a", "128k", mkvPath)
 
-                config.AcquireFFmpeg()
-                defer config.ReleaseFFmpeg()
-                cmd := config.FFmpegCommand(args...)
+		config.AcquireFFmpegHeavy()
+		defer config.ReleaseFFmpegHeavy()
+		cmd := config.FFmpegCommand(args...)
                 output, err := cmd.CombinedOutput()
                 if err != nil {
                         ch.Error("compress: failed %s - %s", srcFilename, err.Error())
@@ -141,10 +143,10 @@ func (ch *Channel) CompressFile(srcPath string) {
 
                 // Delete the original file after successful compression
                 if err := os.Remove(srcPath); err != nil {
-                        ch.Error("compress: failed to delete %s - %s", srcFilename, err.Error())
-                        return
+                        ch.Error("compress: failed to delete %s - %s (continuing)", srcFilename, err.Error())
+                } else {
+                        ch.Info("delete: removed original %s after compression", srcFilename)
                 }
-                ch.Info("delete: removed original %s after compression", srcFilename)
 
                 ch.Info("compress: done %s -> %s (%s, %.1f%%)", srcFilename, mkvFilename, internal.FormatFilesize(int(mkvSize)), ratio)
 
@@ -183,7 +185,9 @@ func (ch *Channel) MuxAV(videoPath, audioPath, outputPath string) error {
                 outputPath,
         }
 
-        cmd := config.FFmpegCommand(args...)
+        ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+        defer cancel()
+        cmd := config.FFmpegCommandContext(ctx, args...)
         output, err := cmd.CombinedOutput()
         if err != nil {
                 if len(output) > 0 {

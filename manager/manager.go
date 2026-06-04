@@ -51,6 +51,10 @@ type Manager struct {
 	Channels sync.Map
 	SSE      *sse.Server
 
+	// watcherDone is closed during graceful shutdown so the fsnotify
+	// watcher can release its file handles promptly.
+	WatcherDone chan struct{}
+
 	// saveDebounce coalesces rapid SaveConfig calls into a single
 	// Supabase PATCH.  The first call starts a 1 s timer; subsequent
 	// calls reset it.  When the timer fires, the actual save runs.
@@ -72,6 +76,11 @@ type Manager struct {
 	// and browser DOM replacements for offline/paused channels.
 	renderCache   map[string]*renderCacheEntry
 	renderCacheMu sync.Mutex
+
+	// watcherMu guards WatcherDone close + reset so the session loop
+	// and the SIGTERM handler cannot panic on double-close.
+	watcherMu     sync.Mutex
+	watcherClosed bool
 }
 
 // New initializes a new Manager instance with an SSE server.
@@ -87,6 +96,7 @@ func New() (*Manager, error) {
 		SSE:          server,
 		logRateLimit: make(map[string]time.Time),
 		renderCache:  make(map[string]*renderCacheEntry),
+		WatcherDone:  make(chan struct{}),
 	}, nil
 }
 
@@ -190,11 +200,18 @@ func (m *Manager) LoadConfig() error {
 		}()
 	}
 
-	// File watcher for real-time orphan detection
+	// File watcher for real-time orphan detection.
+	// Only watch the output directory — files in the temp "videos/"
+	// directory are either active recordings (which the watcher must
+	// not touch) or are already handled by MoveToOutputDir's upload
+	// goroutine after a failed move.
 	go func() {
-		dirs := []string{"videos"}
+		dirs := []string{}
 		if server.Config.OutputDir != "" {
 			dirs = append(dirs, server.Config.OutputDir)
+		}
+		if len(dirs) == 0 {
+			return
 		}
 		fw, err := watcher.New(dirs)
 		if err != nil {
@@ -202,8 +219,7 @@ func (m *Manager) LoadConfig() error {
 			return
 		}
 		log.Printf("[watcher] watching %d directories for new video files", len(dirs))
-		// Run until the process exits (channel never closes)
-		fw.Start(make(chan struct{}))
+		fw.Start(m.WatcherDone)
 	}()
 
 	return nil
@@ -306,6 +322,19 @@ func (m *Manager) StopChannel(username string) error {
 	return nil
 }
 
+// StopWatcher signals the fsnotify file watcher to shut down, releasing
+// its file handles.  Call during graceful shutdown after all channels have
+// been stopped so the watcher cannot race with deferred Cleanup goroutines.
+// Safe to call multiple times — the close is guarded by watcherMu.
+func (m *Manager) StopWatcher() {
+	m.watcherMu.Lock()
+	defer m.watcherMu.Unlock()
+	if !m.watcherClosed {
+		close(m.WatcherDone)
+		m.watcherClosed = true
+	}
+}
+
 // WaitForUploads blocks until all in-flight upload goroutines across every
 // channel have finished. Call this during graceful shutdown so recordings
 // are not lost when the container receives SIGTERM.
@@ -335,6 +364,153 @@ func (m *Manager) WaitForAllChannels() {
 		value.(*channel.Channel).WaitMonitor()
 		return true
 	})
+}
+
+// CancelAllChannels cancels the recording context for every channel.
+// Unlike StopAllChannels, this does NOT close ch.done, so channels
+// can be resumed later via ResumeAllChannels.  The deferred Cleanup
+// inside RecordStream still runs, queuing pending files into UploadWg.
+func (m *Manager) CancelAllChannels() {
+	m.Channels.Range(func(key, value any) bool {
+		ch := value.(*channel.Channel)
+		ch.Cancel()
+		return true
+	})
+}
+
+// ResumeAllChannels resumes every channel in the map.  Skips any
+// channel whose ch.done is already closed (permanently stopped).
+func (m *Manager) ResumeAllChannels() {
+	m.Channels.Range(func(key, value any) bool {
+		value.(*channel.Channel).Resume(0)
+		return true
+	})
+}
+
+// StartWatcher creates a new fsnotify watcher on the output directory
+// and runs it in a background goroutine.  Used by the session loop to
+// re-enable orphan detection after the processing phase completes.
+func (m *Manager) StartWatcher() {
+	dirs := []string{}
+	if server.Config != nil && server.Config.OutputDir != "" {
+		dirs = append(dirs, server.Config.OutputDir)
+	}
+	if len(dirs) == 0 {
+		return
+	}
+
+	m.watcherMu.Lock()
+	m.WatcherDone = make(chan struct{})
+	m.watcherClosed = false
+	m.watcherMu.Unlock()
+
+	go func() {
+		fw, err := watcher.New(dirs)
+		if err != nil {
+			log.Printf("[watcher] failed to start: %v", err)
+			return
+		}
+		log.Printf("[watcher] watching %d directories for new video files", len(dirs))
+		fw.Start(m.WatcherDone)
+	}()
+}
+
+// StartSession begins the automatic recording-session lifecycle.
+// If duration is <= 0 this is a no-op (continuous recording).
+// The session loop: record for duration → cancel all channels →
+// wait for mux/upload/Supabase → resume all channels → repeat.
+func (m *Manager) StartSession(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	go m.sessionLoop(d)
+}
+
+func (m *Manager) sessionLoop(d time.Duration) {
+	for {
+		channels := m.channelCount()
+		if channels == 0 {
+			log.Println("[session] no channels to record — stopping session loop")
+			return
+		}
+		log.Printf("[session] recording session started — next stop in %s with %d channel(s)", d, channels)
+
+		deadline := time.Now().Add(d)
+		timer := time.NewTimer(d)
+		progress := time.NewTicker(30 * time.Minute)
+
+	sessionWait:
+		for {
+			select {
+			case <-timer.C:
+				progress.Stop()
+				break sessionWait
+			case <-progress.C:
+				remaining := time.Until(deadline)
+				if remaining > 0 {
+					log.Printf("[session] %s remaining in recording session", remaining.Round(time.Second))
+				}
+			}
+		}
+
+		log.Println("[session] duration reached — stopping all channels")
+
+		m.CancelAllChannels()
+		m.StopWatcher()
+
+		log.Println("[session] waiting for recordings to finalize...")
+		m.WaitForAllChannels()
+
+		processingDone := make(chan struct{})
+		go func() {
+			ticker := time.NewTicker(30 * time.Second)
+			defer ticker.Stop()
+			elapsed := 30
+			for {
+				select {
+				case <-ticker.C:
+					log.Printf("[session] still finalizing... (%ds elapsed)", elapsed)
+					elapsed += 30
+				case <-processingDone:
+					return
+				}
+			}
+		}()
+
+		log.Println("[session] waiting for mux/thumbnail/upload/Supabase to complete...")
+		waitDone := make(chan struct{})
+		go func() {
+			m.WaitForUploads()
+			close(waitDone)
+		}()
+		select {
+		case <-waitDone:
+		case <-time.After(10 * time.Minute):
+			log.Println("[session] WARN: WaitForUploads timed out after 10 minutes — proceeding anyway")
+		}
+		close(processingDone)
+
+		log.Println("[session] all processing complete — restarting recording session")
+
+		m.ResumeAllChannels()
+		m.StartWatcher()
+	}
+}
+
+// IsFileUploadInFlight returns true if the given file path is currently
+// being uploaded by any channel's upload goroutine.
+func (m *Manager) IsFileUploadInFlight(filePath string) bool {
+	return channel.IsUploadInFlight(filePath)
+}
+
+// channelCount returns the number of channels currently in the map.
+func (m *Manager) channelCount() int {
+	count := 0
+	m.Channels.Range(func(_, _ any) bool {
+		count++
+		return true
+	})
+	return count
 }
 
 // PauseChannel pauses the channel and persists the state.

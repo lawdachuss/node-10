@@ -8,6 +8,8 @@ import (
 	"runtime"
 	"sync"
 
+	"time"
+
 	"github.com/teacat/chaturbate-dvr/entity"
 	"github.com/urfave/cli/v2"
 )
@@ -17,19 +19,35 @@ var (
 	autoDetectedFF   string
 	autoDetectedOnce sync.Once
 
-	// ffmpegSem limits concurrent ffmpeg processes across all channels.
-	// Default: NumCPU * 2 — enough for quick I/O-bound operations (mux,
-	// thumbnail) while still throttling CPU-bound compression.  Override
-	// with the FFMPEG_CONCURRENCY env var.
+	// ffmpegSem limits concurrent lightweight ffmpeg/ffprobe processes
+	// across all channels: thumbnails, sprite sheets, GIF previews,
+	// and A/V muxing. These are I/O-bound and fast, so the pool is
+	// generous: NumCPU * 3, minimum 4.
 	ffmpegSem chan struct{}
+
+	// ffmpegHeavySem limits concurrent CPU-bound compression (re-encode)
+	// across all channels. Only one file per channel is compressed at a
+	// time (CompressFile serialises internally), but across N channels
+	// we risk thrashing the CPU.  Pool: max(1, NumCPU/2), capped at 4.
+	ffmpegHeavySem chan struct{}
 )
 
 func init() {
-	n := runtime.NumCPU() * 2
-	if n < 1 {
-		n = 1
+	n := runtime.NumCPU()
+	light := n * 3
+	if light < 4 {
+		light = 4
 	}
-	ffmpegSem = make(chan struct{}, n)
+	ffmpegSem = make(chan struct{}, light)
+
+	heavy := n / 2
+	if heavy < 1 {
+		heavy = 1
+	}
+	if heavy > 4 {
+		heavy = 4
+	}
+	ffmpegHeavySem = make(chan struct{}, heavy)
 }
 
 // SetFFmpegPath sets a custom path for the ffmpeg binary.
@@ -135,14 +153,24 @@ func FFprobeCommandContext(ctx context.Context, args ...string) *exec.Cmd {
 	return exec.CommandContext(ctx, ffprobeBin(), args...)
 }
 
-// AcquireFFmpeg blocks until a ffmpeg slot is available.
+// AcquireFFmpeg blocks until a lightweight ffmpeg slot is available.
 func AcquireFFmpeg() {
 	ffmpegSem <- struct{}{}
 }
 
-// ReleaseFFmpeg releases a ffmpeg slot.
+// ReleaseFFmpeg releases a lightweight ffmpeg slot.
 func ReleaseFFmpeg() {
 	<-ffmpegSem
+}
+
+// AcquireFFmpegHeavy blocks until a CPU-bound compression slot is available.
+func AcquireFFmpegHeavy() {
+	ffmpegHeavySem <- struct{}{}
+}
+
+// ReleaseFFmpegHeavy releases a CPU-bound compression slot.
+func ReleaseFFmpegHeavy() {
+	<-ffmpegHeavySem
 }
 
 func New(c *cli.Context) (*entity.Config, error) {
@@ -175,8 +203,6 @@ func New(c *cli.Context) (*entity.Config, error) {
 		DiskCriticalPercent:    c.Int("disk-critical-percent"),
 		MaxLocalAgeDays:        c.Int("max-local-age-days"),
 		VoeSXAPIKey:            c.String("voesx-api-key"),
-		SendCMAPIKey:           c.String("sendcm-api-key"),
-		ByseAPIKey:             c.String("byse-api-key"),
 		StreamtapeLogin:        c.String("streamtape-login"),
 		StreamtapeKey:          c.String("streamtape-key"),
 		MixdropEmail:           c.String("mixdrop-email"),
@@ -194,6 +220,14 @@ func New(c *cli.Context) (*entity.Config, error) {
 	if path := c.String("ffmpeg-path"); path != "" {
 		cfg.FFmpegPath = path
 		SetFFmpegPath(path)
+	}
+
+	if dur := c.String("session-duration"); dur != "" {
+		cfg.SessionDuration = dur
+		d, err := time.ParseDuration(dur)
+		if err == nil && d > 0 {
+			cfg.SessionDurationParsed = d
+		}
 	}
 
 	return cfg, nil

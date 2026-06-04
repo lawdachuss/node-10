@@ -2,6 +2,7 @@ package channel
 
 import (
         "bytes"
+        "context"
         "errors"
         "fmt"
         "html/template"
@@ -38,16 +39,15 @@ func (ch *Channel) NextFile() error {
         if err != nil {
                 return err
         }
-        ch.CurrentFilename = filename
-        if err := ch.CreateNewFile(filename); err != nil {
-                return err
-        }
-
-        // Reset segment counters for the new file
         ch.stateMu.Lock()
+        ch.CurrentFilename = filename
         ch.videoSegmentCount = 0
         ch.audioSegmentCount = 0
         ch.stateMu.Unlock()
+
+        if err := ch.CreateNewFile(filename); err != nil {
+                return err
+        }
 
         // Increment the sequence number for the next file
         ch.Sequence++
@@ -80,24 +80,43 @@ func (ch *Channel) Cleanup(isRotation bool) error {
 
 		ch.File = nil
 		ch.AudioFile = nil
-		ch.CurrentFilename = ""
 		ch.stateMu.Lock()
+		ch.CurrentFilename = ""
 		ch.Filesize = 0
 		ch.Duration = 0
+		hasVideo := ch.videoSegmentCount > 0
+		hasAudio := ch.audioSegmentCount > 0
 		ch.stateMu.Unlock()
 
-		// Skip empty files (both tracks zero/missing).
+		// Remove files that contain only init segments with no media data.
 		if ch.HasSeparateAudio {
-			if videoInfo == nil && audioInfo == nil {
+			if !hasVideo && !hasAudio {
+				if videoInfo != nil {
+					os.Remove(videoPath)
+				} else if videoPath != "" {
+					os.Remove(videoPath) // closeTrackedFile failed to remove it above
+				}
+				if audioInfo != nil {
+					os.Remove(audioPath)
+				} else if audioPath != "" {
+					os.Remove(audioPath)
+				}
 				if !isRotation {
 					ch.processPendingQueue()
 				}
 				return nil
 			}
 		} else {
-			if videoInfo == nil || videoInfo.Size() == 0 {
+			if !hasVideo {
+				if videoInfo != nil {
+					os.Remove(videoPath)
+				} else if videoPath != "" {
+					os.Remove(videoPath) // closeTrackedFile failed to remove it above
+				}
 				if !isRotation {
 					ch.processPendingQueue()
+				} else if len(ch.pendingFiles) > 10 {
+					ch.Warn("cleanup: %d pending files accumulated during rotation — will be processed when recording ends", len(ch.pendingFiles))
 				}
 				return nil
 			}
@@ -183,17 +202,22 @@ func (ch *Channel) processPendingMuxPair(videoPath, audioPath string) {
 	finalOutput := strings.TrimSuffix(videoPath, filepath.Ext(videoPath)) + ".muxed.mp4"
 	if err := ch.MuxAV(videoPath, audioPath, finalOutput); err != nil {
                 ch.Info("mux: ffmpeg mux failed, trying native fallback: %s", err.Error())
-                if nativeErr := ch.MuxAVNative(videoPath, audioPath, finalOutput); nativeErr != nil {
-                        ch.Error("mux failed for %s: %v", filepath.Base(videoPath), nativeErr)
-                        return
-                }
+	if nativeErr := ch.MuxAVNative(videoPath, audioPath, finalOutput); nativeErr != nil {
+			ch.Error("mux failed for %s: %v — uploading tracks separately", filepath.Base(videoPath), nativeErr)
+			_ = os.Remove(finalOutput)
+			ch.MoveToOutputDir(videoPath)
+			ch.MoveToOutputDir(audioPath)
+			return
+		}
         }
 
-        if ok, reason := muxOutputLooksValid(finalOutput, videoInfo, audioInfo); !ok {
-                ch.Error("mux: output looks corrupt (%s); keeping sidecars %s and %s", reason, filepath.Base(videoPath), filepath.Base(audioPath))
-                _ = os.Remove(finalOutput)
-                return
-        }
+	if ok, reason := muxOutputLooksValid(finalOutput, videoInfo, audioInfo); !ok {
+		ch.Error("mux: output looks corrupt (%s); uploading sidecars %s and %s separately", reason, filepath.Base(videoPath), filepath.Base(audioPath))
+		_ = os.Remove(finalOutput)
+		ch.MoveToOutputDir(videoPath)
+		ch.MoveToOutputDir(audioPath)
+		return
+	}
 
         _ = os.Remove(videoPath)
         _ = os.Remove(audioPath)
@@ -225,15 +249,22 @@ func muxOutputLooksValid(outputPath string, _ /*videoInfo*/, _ /*audioInfo*/ os.
 // MoveToOutputDir relocates a finalized recording into server.Config.OutputDir.
 // Errors are non-fatal: the recording is already safely written at srcPath.
 func (ch *Channel) MoveToOutputDir(srcPath string) string {
-        if server.Config == nil || server.Config.OutputDir == "" {
-	ch.UploadWg.Add(1)
+	triggerUpload := func(filePath string) {
+		MarkUploadInFlight(filePath)
+		ch.UploadWg.Add(1)
 		go func() {
 			defer ch.UploadWg.Done()
+			defer MarkUploadDone(filePath)
+			thumbURL, spriteURL, previewURL := ch.generateThumbnail(filePath)
 			UploadSem <- struct{}{}
 			ch.uploadSem <- struct{}{}
 			defer func() { <-ch.uploadSem; <-UploadSem }()
-			ch.generatePreviewAndUpload(srcPath)
+			ch.uploadFile(filePath, thumbURL, spriteURL, previewURL)
 		}()
+	}
+
+        if server.Config == nil || server.Config.OutputDir == "" {
+		triggerUpload(srcPath)
 		return srcPath
         }
 
@@ -247,25 +278,34 @@ func (ch *Channel) MoveToOutputDir(srcPath string) string {
         }
 
         destPath := uniqueDestPath(filepath.Join(destDir, filepath.Base(srcPath)))
+        ch.Info("output-dir: moving %s (%s) -> %s", filepath.Base(srcPath), resolvePathForLog(srcPath), destPath)
         if err := moveFile(srcPath, destPath); err != nil {
-                ch.Error("output-dir: move %s: %s", filepath.Base(srcPath), err.Error())
+                ch.Error("output-dir: move %s to %s: %s — uploading from original location (%s)", filepath.Base(srcPath), destDir, err.Error(), resolvePathForLog(srcPath))
+		triggerUpload(srcPath)
+                return srcPath
+        }
+        // Verify the destination actually exists after the move — on some
+        // Windows configurations os.Rename can return nil without moving
+        // the file (e.g. when src and dest resolve to the same path via
+        // symlinks or junctions).  If the dest is missing, fall back to
+        // the original location.
+        if _, statErr := os.Stat(destPath); statErr != nil {
+                ch.Error("output-dir: post-move stat of dest %s failed: %v — uploading from original location (%s)", destPath, statErr, resolvePathForLog(srcPath))
+                triggerUpload(srcPath)
                 return srcPath
         }
         ch.Info("output-dir: moved %s -> %s", filepath.Base(srcPath), destPath)
-	ch.UploadWg.Add(1)
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				log.Printf("[PANIC] upload goroutine for %s: %v", filepath.Base(destPath), r)
-			}
-			ch.UploadWg.Done()
-		}()
-		UploadSem <- struct{}{}
-		ch.uploadSem <- struct{}{}
-		defer func() { <-ch.uploadSem; <-UploadSem }()
-		ch.generatePreviewAndUpload(destPath)
-	}()
+	triggerUpload(destPath)
 	return destPath
+}
+
+// resolvePathForLog resolves a path to its absolute form for logging.
+// If resolution fails, returns the original path unchanged.
+func resolvePathForLog(path string) string {
+	if abs, err := filepath.Abs(path); err == nil {
+		return abs
+	}
+	return path
 }
 
 func (ch *Channel) generatePreviewAndUpload(filePath string) {
@@ -274,21 +314,20 @@ func (ch *Channel) generatePreviewAndUpload(filePath string) {
 }
 
 // uniqueDestPath returns path if it does not exist, otherwise appends
-// " (n)" before the extension until an unused path is found. Gives up
-// after 1000 tries and returns the last candidate.
+// " (n)" before the extension until an unused path is found.
 func uniqueDestPath(path string) string {
         if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
                 return path
         }
         ext := filepath.Ext(path)
         base := path[:len(path)-len(ext)]
-        for i := 1; i < 1000; i++ {
+        for i := 1; i < 100000; i++ {
                 candidate := fmt.Sprintf("%s (%d)%s", base, i, ext)
                 if _, err := os.Stat(candidate); errors.Is(err, os.ErrNotExist) {
                         return candidate
                 }
         }
-        return fmt.Sprintf("%s (999)%s", base, ext)
+        return fmt.Sprintf("%s (99999)%s", base, ext)
 }
 
 func moveFile(src, dest string) error {
@@ -300,13 +339,14 @@ func moveFile(src, dest string) error {
         if err != nil {
                 return err
         }
-        defer in.Close()
 
         out, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0666)
         if err != nil {
+                in.Close()
                 return err
         }
         if _, err := io.Copy(out, in); err != nil {
+                in.Close()
                 out.Close()
                 os.Remove(dest)
                 return err
@@ -314,14 +354,20 @@ func moveFile(src, dest string) error {
         // Sync before close so a crash between close and os.Remove(src) can't
         // leave a truncated destination alongside a deleted source.
         if err := out.Sync(); err != nil {
+                in.Close()
                 out.Close()
                 os.Remove(dest)
                 return err
         }
         if err := out.Close(); err != nil {
+                in.Close()
                 os.Remove(dest)
                 return err
         }
+        // Close the source handle BEFORE removing the file.  On Windows,
+        // DeleteFileW fails with ERROR_ACCESS_DENIED when any handle is
+        // still open, so defer in.Close() would keep the file busy.
+        in.Close()
         return os.Remove(src)
 }
 
@@ -371,6 +417,8 @@ func (ch *Channel) CreateNewFile(filename string) error {
         if len(ch.InitSegment) > 0 {
                 n, err := ch.File.Write(ch.InitSegment)
                 if err != nil {
+                        ch.File.Close()
+                        ch.File = nil
                         return fmt.Errorf("write init segment: %w", err)
                 }
                 ch.stateMu.Lock()
@@ -617,8 +665,11 @@ func DeleteSidecarFiles(videoPath string) {
 }
 
 // muxVideoAudio combines a separate video and audio file into a single MP4.
+// Uses a 5-minute timeout so a hung ffmpeg cannot leak the caller's goroutine.
 func muxVideoAudio(videoPath, audioPath, outputPath string) error {
-        cmd := config.FFmpegCommand("-y",
+        ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+        defer cancel()
+        cmd := config.FFmpegCommandContext(ctx, "-y",
                 "-i", videoPath,
                 "-i", audioPath,
                 "-c", "copy",
@@ -637,6 +688,20 @@ func extractUsernameFromFilename(filename string) string {
 		rest := filename[idx+1:]
 		if len(rest) >= 10 && rest[3] == '-' && rest[6] == '-' {
 			return filename[:idx]
+		}
+	}
+	return ""
+}
+
+// extractTimestampFromFilename parses the standard recording timestamp from a
+// filename like "username_2025-01-01_12-00-00.mp4" and returns it in Supabase
+// format ("2025-01-01T12:00:00Z").  Returns "" if the pattern is not found.
+func extractTimestampFromFilename(filename string) string {
+	base := strings.TrimSuffix(filename, filepath.Ext(filename))
+	if idx := strings.Index(base, "_20"); idx > 0 {
+		ts := base[idx+1:]
+		if len(ts) >= 19 && ts[4] == '-' && ts[7] == '-' && ts[10] == '_' && ts[13] == '-' && ts[16] == '-' {
+			return ts[:10] + "T" + ts[11:13] + ":" + ts[14:16] + ":" + ts[17:19] + "Z"
 		}
 	}
 	return ""
@@ -693,12 +758,6 @@ func configuredUploadHosts() []string {
 	if cfg.VoeSXAPIKey != "" {
 		hosts = append(hosts, "VOE.sx")
 	}
-	if cfg.SendCMAPIKey != "" {
-		hosts = append(hosts, "SendCM")
-	}
-	if cfg.ByseAPIKey != "" {
-		hosts = append(hosts, "Byse")
-	}
 	if cfg.StreamtapeLogin != "" && cfg.StreamtapeKey != "" {
 		hosts = append(hosts, "Streamtape")
 	}
@@ -719,6 +778,8 @@ func configuredUploadHosts() []string {
 // times with a 60-second delay between attempts.  This handles transient network
 // or API outages that can occur when the app restarts after a crash.
 func UploadOrphanedFile(filePath, thumbURL, spriteURL, previewURL string) bool {
+	MarkUploadInFlight(filePath)
+	defer MarkUploadDone(filePath)
 	cfg := server.Config
 	if cfg == nil {
 		return false
@@ -757,8 +818,6 @@ func UploadOrphanedFile(filePath, thumbURL, spriteURL, previewURL string) bool {
 
 	upl := uploader.NewMultiHostUploader(
 		cfg.VoeSXAPIKey,
-		cfg.SendCMAPIKey,
-		cfg.ByseAPIKey,
 		cfg.StreamtapeLogin,
 		cfg.StreamtapeKey,
 		cfg.MixdropEmail,
@@ -847,7 +906,10 @@ func UploadOrphanedFile(filePath, thumbURL, spriteURL, previewURL string) bool {
 		filesize = stat.Size()
 	}
 
-	timestamp := time.Now().UTC().Format("2006-01-02T15:04:05Z")
+	timestamp := extractTimestampFromFilename(filename)
+	if timestamp == "" {
+		timestamp = time.Now().UTC().Format("2006-01-02T15:04:05Z")
+	}
 	if err := server.SaveRecordingWithLinks(
 		extractUsernameFromFilename(filename), filename, timestamp,
 		"", nil, 0, "", 0, filesize, "", embedURL, thumbURL, spriteURL, previewURL, links,
@@ -877,6 +939,11 @@ func (ch *Channel) ShouldSwitchFile() bool {
         maxFilesizeBytes := ch.Config.MaxFilesize * 1024 * 1024
         maxDurationSeconds := ch.Config.MaxDuration * 60
 
-        return (ch.Duration >= float64(maxDurationSeconds) && ch.Config.MaxDuration > 0) ||
-                (ch.Filesize >= maxFilesizeBytes && ch.Config.MaxFilesize > 0)
+        ch.stateMu.Lock()
+        dur := ch.Duration
+        fsize := ch.Filesize
+        ch.stateMu.Unlock()
+
+        return (dur >= float64(maxDurationSeconds) && ch.Config.MaxDuration > 0) ||
+                (fsize >= maxFilesizeBytes && ch.Config.MaxFilesize > 0)
 }

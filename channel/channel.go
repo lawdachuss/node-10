@@ -28,6 +28,7 @@ type pendingFile struct {
 type Channel struct {
 	CancelFunc      context.CancelFunc
 	PauseCancelFunc context.CancelFunc
+	cancelMu        sync.Mutex // guards CancelFunc and PauseCancelFunc writes
 	LogCh           chan string
 	UpdateCh        chan bool
 	done            chan struct{} // closed when channel is torn down
@@ -129,8 +130,11 @@ func (ch *Channel) Publisher() {
 //
 // This is used to cancel the context when the channel is stopped or paused.
 func (ch *Channel) WithCancel(ctx context.Context) (context.Context, context.CancelFunc) {
+	ch.cancelMu.Lock()
 	ctx, ch.CancelFunc = context.WithCancel(ctx)
-	return ctx, ch.CancelFunc
+	cancel := ch.CancelFunc
+	ch.cancelMu.Unlock()
+	return ctx, cancel
 }
 
 // Info logs an informational message.
@@ -189,13 +193,19 @@ func (ch *Channel) exportInfo(includeLogs bool) *entity.ChannelInfo {
 	duration := ch.Duration
 	filesize := ch.Filesize
 	currentFilename := ch.CurrentFilename
+	hasSeparateAudio := ch.HasSeparateAudio
+	hasFile := ch.File != nil
+	var fileName string
+	if hasFile {
+		fileName = ch.File.Name()
+	}
 	ch.stateMu.Unlock()
 
 	var filename string
-	if currentFilename != "" && ch.HasSeparateAudio {
+	if currentFilename != "" && hasSeparateAudio {
 		filename = currentFilename + ".mp4"
-	} else if ch.File != nil {
-		filename = ch.File.Name()
+	} else if hasFile {
+		filename = fileName
 	}
 
 	var logsCopy []string
@@ -229,7 +239,9 @@ func (ch *Channel) exportInfo(includeLogs bool) *entity.ChannelInfo {
 func (ch *Channel) Pause() {
 	// Stop the monitoring loop and hand over to CheckOnlineWhilePaused
 	// which will poll the API to keep RoomStatus and IsOnline up to date.
+	ch.cancelMu.Lock()
 	ch.CancelFunc()
+	ch.cancelMu.Unlock()
 
 	ch.Config.IsPaused.Store(true)
 	ch.Update()
@@ -244,14 +256,25 @@ func (ch *Channel) Pause() {
 	}()
 
 	ctx, cancel := context.WithCancel(context.Background())
+	ch.cancelMu.Lock()
 	ch.PauseCancelFunc = cancel
+	ch.cancelMu.Unlock()
 	go ch.CheckOnlineWhilePaused(ctx, 0)
+}
+
+// Cancel safely calls the channel's CancelFunc under the cancelMu lock.
+func (ch *Channel) Cancel() {
+	ch.cancelMu.Lock()
+	ch.CancelFunc()
+	ch.cancelMu.Unlock()
 }
 
 // Stop stops the channel and cancels the context.
 func (ch *Channel) Stop() {
+	ch.cancelMu.Lock()
 	ch.CancelFunc()
 	ch.PauseCancelFunc()
+	ch.cancelMu.Unlock()
 	ch.closeDone.Do(func() { close(ch.done) })
 	ch.Info("channel stopped")
 }
@@ -265,7 +288,9 @@ func (ch *Channel) Resume(_ int) {
 	default:
 	}
 
+	ch.cancelMu.Lock()
 	ch.PauseCancelFunc()
+	ch.cancelMu.Unlock()
 	ch.Config.IsPaused.Store(false)
 
 	ch.Update()

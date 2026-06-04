@@ -214,6 +214,12 @@ func main() {
 				EnvVars: []string{"DISK_CRITICAL_PERCENT"},
 				Value:   90,
 			},
+			&cli.StringFlag{
+				Name:    "session-duration",
+				Usage:   "Recording session length (e.g. \"5h20m0s\"); after this elapses the system stops, processes all pending files, then restarts (empty = continuous recording)",
+				EnvVars: []string{"SESSION_DURATION"},
+				Value:   "",
+			},
 			&cli.IntFlag{
 				Name:    "max-local-age-days",
 				Usage:   "Delete local recordings older than this many days if already uploaded (0 = disabled)",
@@ -224,18 +230,6 @@ func main() {
 				Name:    "voesx-api-key",
 				Usage:   "API key for VOE.sx uploads",
 				EnvVars: []string{"VOESX_API_KEY"},
-				Value:   "",
-			},
-			&cli.StringFlag{
-				Name:    "sendcm-api-key",
-				Usage:   "API key for SendCM uploads (optional, guest upload if empty)",
-				EnvVars: []string{"SENDCM_API_KEY"},
-				Value:   "",
-			},
-			&cli.StringFlag{
-				Name:    "byse-api-key",
-				Usage:   "API key for Byse uploads",
-				EnvVars: []string{"BYSE_API_KEY"},
 				Value:   "",
 			},
 			&cli.StringFlag{
@@ -378,6 +372,7 @@ func start(c *cli.Context) error {
 		}()
 
 		server.Manager.StopAllChannels()
+		server.Manager.StopWatcher()
 		fmt.Println("[SHUTDOWN] all channels stopped — waiting for mux/thumbnail/upload/Supabase to finish...")
 
 		shutdownDone := make(chan struct{})
@@ -431,6 +426,8 @@ func start(c *cli.Context) error {
 			return fmt.Errorf("load config: %w", err)
 		}
 
+		server.Manager.StartSession(server.Config.SessionDurationParsed)
+
 		// Start background disk monitor
 		go server.StartDiskMonitor(make(chan struct{}))
 
@@ -452,6 +449,8 @@ func start(c *cli.Context) error {
 	}, false); err != nil {
 		return fmt.Errorf("create channel: %w", err)
 	}
+
+	server.Manager.StartSession(server.Config.SessionDurationParsed)
 
 	// block forever
 	select {}

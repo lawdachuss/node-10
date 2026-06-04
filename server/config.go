@@ -10,7 +10,8 @@ import (
 )
 
 var Config *entity.Config
-var configMu sync.RWMutex
+var ConfigMu sync.RWMutex
+var configMu = &ConfigMu // alias for internal use
 
 type persistedSettings struct {
 	Cookies         string `json:"cookies"`
@@ -27,7 +28,7 @@ type persistedSettings struct {
 
 // SaveSettings writes the runtime cookies and user-agent to Supabase.
 func SaveSettings() error {
-	configMu.RLock()
+	ConfigMu.RLock()
 	s := persistedSettings{
 		Cookies:         Config.Cookies,
 		SessionID:       Config.SessionID,
@@ -40,7 +41,7 @@ func SaveSettings() error {
 		MixdropToken:    Config.MixdropToken,
 		PixelDrainToken: Config.PixelDrainToken,
 	}
-	configMu.RUnlock()
+	ConfigMu.RUnlock()
 
 	b, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
@@ -65,7 +66,7 @@ func LoadSettings() error {
 		return fmt.Errorf("unmarshal settings: %w", err)
 	}
 
-	configMu.Lock()
+	ConfigMu.Lock()
 	if s.Cookies != "" {
 		Config.Cookies = s.Cookies
 	}
@@ -109,7 +110,7 @@ func LoadSettings() error {
 			Config.Csrftoken = extractCookie(Config.Cookies, "csrftoken")
 		}
 	}
-	configMu.Unlock()
+	ConfigMu.Unlock()
 
 	return nil
 }

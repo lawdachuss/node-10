@@ -118,10 +118,10 @@ def main():
 
     old = parse_cookies(cookie_str)
     print(f"  Loaded {len(old)} cookies")
-    print(f"  sessionid: {'✓' if 'sessionid' in old else '✗'}")
-    print(f"  csrftoken: {'✓' if 'csrftoken' in old else '✗'}")
-    print(f"  cf_clearance: {'✓' if 'cf_clearance' in old else '✗'}")
-    print(f"  Proxy: {'✓' if proxy else '✗ (direct)'}")
+    print(f"  sessionid: {'[OK]' if 'sessionid' in old else '[NO]'}")
+    print(f"  csrftoken: {'[OK]' if 'csrftoken' in old else '[NO]'}")
+    print(f"  cf_clearance: {'[OK]' if 'cf_clearance' in old else '[NO]'}")
+    print(f"  Proxy: {'[OK]' if proxy else '[NO] (direct)'}")
 
     # --- Launch Scrapling and visit chaturbate.com ---
     print("\n[2/4] Launching browser with Cloudflare bypass...")
@@ -164,7 +164,7 @@ def main():
         return
 
     print(f"  Got {len(new_browser_cookies)} cookies from browser session")
-    print(f"  Fresh cf_clearance: {'✓' if 'cf_clearance' in new_browser_cookies else '✗'}")
+    print(f"  Fresh cf_clearance: {'[OK]' if 'cf_clearance' in new_browser_cookies else '[NO]'}")
 
     # --- Merge cookies ---
     print("\n[3/4] Merging cookies...")
@@ -207,7 +207,7 @@ def main():
     result = supabase_request("PATCH", patch_url, supabase_key, {"value": settings_value})
 
     if result is not None:
-        print("  [OK] Cookies updated in Supabase")
+        print("  [OK] Cookies saved to Supabase")
     else:
         print("  Row may not exist yet, trying INSERT...")
         result = supabase_request(

@@ -106,6 +106,7 @@ func videoExt(name string) bool {
 func isSidecar(name string) bool {
 	return strings.HasSuffix(name, ".thumb.jpg") ||
 		strings.HasSuffix(name, ".sprite.jpg") ||
+		strings.HasSuffix(name, ".preview.gif") ||
 		strings.HasSuffix(name, ".thumb") ||
 		strings.HasSuffix(name, ".sprite") ||
 		strings.HasSuffix(name, ".video.mp4") ||

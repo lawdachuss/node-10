@@ -264,6 +264,7 @@ func videoExt(name string) bool {
 func isSidecar(name string) bool {
 	return strings.HasSuffix(name, ".thumb.jpg") ||
 		strings.HasSuffix(name, ".sprite.jpg") ||
+		strings.HasSuffix(name, ".preview.gif") ||
 		strings.HasSuffix(name, ".thumb") ||
 		strings.HasSuffix(name, ".sprite") ||
 		strings.HasSuffix(name, ".video.mp4") ||
@@ -666,7 +667,7 @@ func CleanupOrphanedFiles() {
 		processAllPendingSegments()
 
                 // Clean up orphaned sidecar files whose main video no longer exists
-			sidecarExts := []string{".thumb.jpg", ".sprite.jpg", ".thumb", ".sprite"}
+			sidecarExts := []string{".thumb.jpg", ".sprite.jpg", ".preview.gif", ".thumb", ".sprite"}
                 for _, e := range entries {
                         if e.IsDir() {
                                 continue
@@ -696,7 +697,7 @@ func CleanupOrphanedFiles() {
 
 // DeleteSidecarFiles removes preview sidecar files associated with a video path.
 func DeleteSidecarFiles(videoPath string) {
-        for _, suffix := range []string{".thumb.jpg", ".sprite.jpg", ".thumb", ".sprite"} {
+        for _, suffix := range []string{".thumb.jpg", ".sprite.jpg", ".preview.gif", ".thumb", ".sprite"} {
                 os.Remove(videoPath + suffix)
         }
 }

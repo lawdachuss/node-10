@@ -206,7 +206,7 @@ func freeDiskSpace(targetPercent, currentPercent int) (int, error) {
 			continue
 		}
 		// Clean up associated preview sidecar files
-		for _, s := range []string{".thumb.jpg", ".sprite.jpg", ".thumb", ".sprite"} {
+		for _, s := range []string{".thumb.jpg", ".sprite.jpg", ".preview.gif", ".thumb", ".sprite"} {
 			os.Remove(vf.path + s)
 		}
 		freed += vf.size
@@ -278,7 +278,7 @@ func deleteOldLocalFiles(maxAgeDays int) (int, error) {
 				continue
 			}
 			// Clean up associated preview sidecar files
-			for _, s := range []string{".thumb.jpg", ".sprite.jpg", ".thumb", ".sprite"} {
+			for _, s := range []string{".thumb.jpg", ".sprite.jpg", ".preview.gif", ".thumb", ".sprite"} {
 				os.Remove(path + s)
 			}
 			deleted++

@@ -226,7 +226,7 @@ func (ch *Channel) uploadFile(filePath string, thumbURL, spriteURL, previewURL s
 			}
 			_ = os.Remove(filePath)
 			// Also clean up any associated preview sidecar files
-			for _, suffix := range []string{".thumb.jpg", ".sprite.jpg", ".thumb", ".sprite"} {
+			for _, suffix := range []string{".thumb.jpg", ".sprite.jpg", ".preview.gif", ".thumb", ".sprite"} {
 				_ = os.Remove(filePath + suffix)
 			}
 			// Clean up journal entries since local file is gone

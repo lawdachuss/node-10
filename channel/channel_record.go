@@ -434,18 +434,30 @@ func (ch *Channel) fetchStreamWithRetry(ctx context.Context, client *internal.Re
 func (ch *Channel) watchLoopSCWithRetry(ctx context.Context, client *internal.Req, p *stripchat.Playlist, retryCount int) error {
 	err := p.WatchAVSegments(ctx, ch.HandleSegment, ch.HandleInitSegment, ch.HandleAudioSegment, ch.HandleAudioInitSegment, ch.OnPollComplete)
 	if err != nil && errors.Is(err, internal.ErrStreamStalled) {
-		ch.Info("recording: CDN session expired — fetching fresh stream URL (refresh #%d)", retryCount+1)
+		ch.Info("recording: CDN session expired — refreshing master playlist (refresh #%d)", retryCount+1)
 
-		siteImpl := stripchat.NewStripchatSite()
-		info, fetchErr := ch.fetchStreamWithRetry(ctx, client, siteImpl)
-		if fetchErr != nil {
-			ch.Info("recording: channel appears offline after CDN expiry (%s)", fetchErr)
-			return fetchErr
-		}
-
-		newPlaylist, apiErr := stripchat.FetchPlaylist(ctx, client, info.HLSSource, p.PDKey, ch.Config.Resolution, ch.Config.Framerate)
+		// The variant playlist URL has a short-lived ?pkey= token (~20s).
+		// The master playlist URL has no token — re-fetch it to get a fresh
+		// pkey embedded in the response, then build a new variant URL.
+		// This is much cheaper than calling the Stripchat API.
+		//
+		// Pass pdkey="" so FetchPlaylist extracts the fresh pkey from the
+		// new master body and resolves a new pdkey for MOUFLON decryption.
+		newPlaylist, apiErr := stripchat.FetchPlaylist(ctx, client, p.MasterURL, "", ch.Config.Resolution, ch.Config.Framerate)
 		if apiErr != nil {
-			return apiErr
+			// Master fetch failed — the stream may have ended.
+			// Fall back to the Stripchat API to check online status.
+			ch.Info("recording: master playlist unavailable (%s) — checking API", apiErr)
+			siteImpl := stripchat.NewStripchatSite()
+			info, fetchErr := ch.fetchStreamWithRetry(ctx, client, siteImpl)
+			if fetchErr != nil {
+				ch.Info("recording: channel appears offline after CDN expiry (%s)", fetchErr)
+				return fetchErr
+			}
+			newPlaylist, apiErr = stripchat.FetchPlaylist(ctx, client, info.HLSSource, "", ch.Config.Resolution, ch.Config.Framerate)
+			if apiErr != nil {
+				return apiErr
+			}
 		}
 		ch.Resolution = fmt.Sprintf("%dp", newPlaylist.Resolution)
 		ch.Framerate = newPlaylist.Framerate
@@ -453,7 +465,6 @@ func (ch *Channel) watchLoopSCWithRetry(ctx context.Context, client *internal.Re
 		ch.RoomStatus = site.StatusPublic
 		ch.stateMu.Unlock()
 		ch.UpdateOnlineStatus(true)
-		// No hard retry limit — context cancellation handles stopping.
 		return ch.watchLoopSCWithRetry(ctx, client, newPlaylist, retryCount+1)
 	}
 	return err

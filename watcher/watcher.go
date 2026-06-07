@@ -10,11 +10,11 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/teacat/chaturbate-dvr/channel"
+	"github.com/teacat/chaturbate-dvr/server"
 )
 
 const (
 	debounceWindow = 5 * time.Second // how long to wait for writes to settle
-	watchDirsLimit = 20              // max directories to watch
 )
 
 // FileWatcher monitors directories for new video files and processes them.
@@ -56,7 +56,7 @@ func New(dirs []string) (*FileWatcher, error) {
 	return fw, nil
 }
 
-// addDir adds a directory and its immediate subdirectories to the watch list.
+// addDir adds a directory and all nested subdirectories to the watch list.
 func (fw *FileWatcher) addDir(dir string) error {
 	info, err := os.Stat(dir)
 	if err != nil {
@@ -69,29 +69,22 @@ func (fw *FileWatcher) addDir(dir string) error {
 		return nil
 	}
 
-	if err := fw.watcher.Add(dir); err != nil {
-		return err
-	}
-
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return err
-	}
-
-	count := 0
-	for _, e := range entries {
-		if count >= watchDirsLimit {
-			break
+	return filepath.WalkDir(dir, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			log.Printf("[watcher] cannot inspect %s: %v", path, walkErr)
+			return nil
 		}
-		if e.IsDir() {
-			sub := filepath.Join(dir, e.Name())
-			if err := fw.watcher.Add(sub); err == nil {
-				count++
+		if !d.IsDir() {
+			return nil
+		}
+		if err := fw.watcher.Add(path); err != nil {
+			if os.IsNotExist(err) {
+				return nil
 			}
+			log.Printf("[watcher] could not watch %s: %v", path, err)
 		}
-	}
-
-	return nil
+		return nil
+	})
 }
 
 // videoExt returns true if the extension is a known video extension.
@@ -147,6 +140,15 @@ func (fw *FileWatcher) Start(done <-chan struct{}) {
 func (fw *FileWatcher) handleEvent(event fsnotify.Event) {
 	name := event.Name
 	base := filepath.Base(name)
+
+	if event.Op&fsnotify.Create != 0 {
+		if info, err := os.Stat(name); err == nil && info.IsDir() {
+			if err := fw.addDir(name); err != nil {
+				log.Printf("[watcher] could not watch new directory %s: %v", name, err)
+			}
+			return
+		}
+	}
 
 	// Only interested in new/updated video files
 	if !videoExt(base) || isSidecar(base) {
@@ -208,6 +210,10 @@ func (fw *FileWatcher) processFile(filePath string) {
 
 	// Skip if all hosts already have this file per the upload journal
 	if channel.IsAlreadyFullyUploaded(filePath) {
+		if server.Config == nil || !server.Config.DeleteLocalAfterUpload {
+			log.Printf("[watcher] %s already fully uploaded; keeping local copy", base)
+			return
+		}
 		log.Printf("[watcher] %s already fully uploaded — removing local copy", base)
 		os.Remove(filePath)
 		channel.DeleteSidecarFiles(filePath)
@@ -218,5 +224,7 @@ func (fw *FileWatcher) processFile(filePath string) {
 
 	// Generate thumbnails and upload
 	thumbURL, spriteURL, previewURL := channel.GenerateThumbnailForFile(filePath)
-	channel.UploadOrphanedFile(filePath, thumbURL, spriteURL, previewURL)
+	if !channel.UploadOrphanedFile(filePath, thumbURL, spriteURL, previewURL) {
+		log.Printf("[watcher] upload failed for %s; file will remain for retry", base)
+	}
 }

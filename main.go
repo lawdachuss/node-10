@@ -176,13 +176,13 @@ func main() {
 				EnvVars: []string{"FFMPEG_PATH"},
 				Value:   "",
 			},
-		&cli.BoolFlag{
-			Name:  "no-tunnel",
-			Usage: "Skip automatic Cloudflare tunnel startup (useful when script manages it separately)",
-			Value: false,
-		},
-		&cli.BoolFlag{
-			Name:  "compress",
+			&cli.BoolFlag{
+				Name:  "no-tunnel",
+				Usage: "Skip automatic Cloudflare tunnel startup (useful when script manages it separately)",
+				Value: false,
+			},
+			&cli.BoolFlag{
+				Name:  "compress",
 				Usage: "Compress recorded files (.ts or .mp4) to .mkv using ffmpeg after recording (auto-enabled if ffmpeg is installed)",
 				Value: false,
 			},
@@ -276,7 +276,7 @@ func main() {
 				EnvVars: []string{"PIXELDRAIN_TOKEN", "PIXELDRAIN_API_KEY"},
 				Value:   "",
 			},
-		&cli.StringFlag{
+			&cli.StringFlag{
 				Name:    "supabase-url",
 				Usage:   "Supabase project URL for remote data persistence (REST API fallback)",
 				EnvVars: []string{"SUPABASE_URL"},
@@ -288,12 +288,12 @@ func main() {
 				EnvVars: []string{"SUPABASE_API_KEY"},
 				Value:   "",
 			},
-		&cli.StringFlag{
-			Name:    "stripchat-pdkey",
-			Usage:   "MOUFLON v2 decryption key for Stripchat HLS streams",
-			EnvVars: []string{"STRIPCHAT_PDKEY"},
-			Value:   "",
-		},
+			&cli.StringFlag{
+				Name:    "stripchat-pdkey",
+				Usage:   "MOUFLON v2 decryption key for Stripchat HLS streams",
+				EnvVars: []string{"STRIPCHAT_PDKEY"},
+				Value:   "",
+			},
 		},
 		Action: start,
 	}
@@ -354,8 +354,8 @@ func start(c *cli.Context) error {
 	fmt.Printf("[startup] manager created in %v\n", time.Since(started).Round(time.Millisecond))
 
 	// Graceful shutdown: catch SIGTERM/SIGINT, stop all recording
-	// channels first (so their Cleanup() runs and queues files into
-	// UploadWg), then wait for post-processing + uploads + Supabase
+	// channels first (so their Cleanup() runs and queues files), then
+	// wait for post-processing + uploads + Supabase
 	// saves to finish before exiting.  A progress ticker logs every
 	// 30 s so the GitHub Actions log shows the process is still alive.
 	go func() {
@@ -364,7 +364,7 @@ func start(c *cli.Context) error {
 		sig := <-sigCh
 
 		channels := server.Manager.ChannelInfo()
-		fmt.Printf("\n[SHUTDOWN] received %v — stopping %d channel(s)...\n", sig, len(channels))
+		fmt.Printf("\n[SHUTDOWN] received %v - stopping %d channel(s)...\n", sig, len(channels))
 		for _, ch := range channels {
 			fmt.Printf("[SHUTDOWN]   stopping %s\n", ch.Username)
 		}
@@ -372,13 +372,13 @@ func start(c *cli.Context) error {
 		// Listen for a second Ctrl+C to force exit immediately
 		go func() {
 			<-sigCh
-			fmt.Println("\n[SHUTDOWN] received second interrupt — forcing immediate exit")
+			fmt.Println("\n[SHUTDOWN] received second interrupt - forcing immediate exit")
 			os.Exit(1)
 		}()
 
 		server.Manager.StopAllChannels()
 		server.Manager.StopWatcher()
-		fmt.Println("[SHUTDOWN] all channels stopped — waiting for mux/thumbnail/upload/Supabase to finish...")
+		fmt.Println("[SHUTDOWN] all channels stopped - waiting for mux/thumbnail/upload/Supabase to finish...")
 
 		shutdownDone := make(chan struct{})
 		go func() {
@@ -399,10 +399,10 @@ func start(c *cli.Context) error {
 		done := make(chan struct{}, 1)
 		go func() {
 			server.Manager.WaitForAllChannels()
-			fmt.Println("[SHUTDOWN] all recordings finalized — waiting for uploads and Supabase saves...")
+			fmt.Println("[SHUTDOWN] all recordings finalized - waiting for uploads and Supabase saves...")
 			server.Manager.WaitForUploads()
 			close(shutdownDone)
-			fmt.Println("[SHUTDOWN] all uploads and Supabase saves complete — exiting cleanly")
+			fmt.Println("[SHUTDOWN] all uploads and Supabase saves complete - exiting cleanly")
 			close(diskMonitorStop)
 			if c, ok := tunnelCancel.Load().(context.CancelFunc); ok && c != nil {
 				c()
@@ -413,8 +413,8 @@ func start(c *cli.Context) error {
 		select {
 		case <-done:
 			os.Exit(0)
-		case <-time.After(5 * time.Minute):
-			fmt.Println("[SHUTDOWN] timeout (5 min) — forcing exit")
+		case <-time.After(55 * time.Minute):
+			fmt.Println("[SHUTDOWN] timeout (55 min) - forcing exit")
 			os.Exit(1)
 		}
 	}()
@@ -449,17 +449,17 @@ func start(c *cli.Context) error {
 	channel.CleanupOrphanedFiles()
 	go server.StartDiskMonitor(diskMonitorStop)
 
-		if err := server.Manager.CreateChannel(&entity.ChannelConfig{
-				Site:                    c.String("site"),
-				Username:                c.String("username"),
-				Framerate:               c.Int("framerate"),
-				Resolution:              c.Int("resolution"),
-				Pattern:                 c.String("pattern"),
-				MaxDuration:             c.Int("max-duration"),
-				MaxFilesize:             c.Int("max-filesize"),
-				Compress:                c.Bool("compress"),
-				MinDurationBeforeUpload: c.Int("min-duration-before-upload"),
-			}, false); err != nil {
+	if err := server.Manager.CreateChannel(&entity.ChannelConfig{
+		Site:                    c.String("site"),
+		Username:                c.String("username"),
+		Framerate:               c.Int("framerate"),
+		Resolution:              c.Int("resolution"),
+		Pattern:                 c.String("pattern"),
+		MaxDuration:             c.Int("max-duration"),
+		MaxFilesize:             c.Int("max-filesize"),
+		Compress:                c.Bool("compress"),
+		MinDurationBeforeUpload: c.Int("min-duration-before-upload"),
+	}, false); err != nil {
 		return fmt.Errorf("create channel: %w", err)
 	}
 

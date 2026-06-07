@@ -65,12 +65,17 @@ type uploadResponse struct {
 
 // Upload uploads a file to GoFile and returns the download link
 func (u *GoFileUploader) Upload(filePath string) (string, error) {
+	return u.UploadWithProgress(filePath, nil)
+}
+
+// UploadWithProgress uploads a file to GoFile and reports progress through fn.
+func (u *GoFileUploader) UploadWithProgress(filePath string, progress ProgressFunc) (string, error) {
 	gofileSem <- struct{}{}
 	defer func() { <-gofileSem }()
 
 	var downloadLink string
 	var lastErr error
-	
+
 	// Retry with exponential backoff: 0s, 5s, 15s, 35s (total ~55s)
 	maxAttempts := 4
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
@@ -78,7 +83,7 @@ func (u *GoFileUploader) Upload(filePath string) (string, error) {
 			backoff := time.Duration((1<<uint(attempt-2))*5) * time.Second // 5s, 10s, 20s
 			time.Sleep(backoff)
 		}
-		
+
 		// Step 1: Get the best server
 		server, err := u.getBestServer()
 		if err != nil {
@@ -90,7 +95,7 @@ func (u *GoFileUploader) Upload(filePath string) (string, error) {
 		}
 
 		// Step 2: Upload the file
-		downloadLink, err = u.uploadFile(server, filePath)
+		downloadLink, err = u.uploadFile(server, filePath, progress)
 		if err != nil {
 			lastErr = fmt.Errorf("upload file: %w", err)
 			if attempt < maxAttempts {
@@ -98,11 +103,11 @@ func (u *GoFileUploader) Upload(filePath string) (string, error) {
 			}
 			return "", lastErr
 		}
-		
+
 		// Success!
 		return downloadLink, nil
 	}
-	
+
 	return "", lastErr
 }
 
@@ -140,7 +145,7 @@ func (u *GoFileUploader) getBestServer() (string, error) {
 	return serverResp.Data.Servers[0].Name, nil
 }
 
-func (u *GoFileUploader) uploadFile(server, filePath string) (string, error) {
+func (u *GoFileUploader) uploadFile(server, filePath string, progress ProgressFunc) (string, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
 		return "", fmt.Errorf("open file: %w", err)
@@ -169,7 +174,7 @@ func (u *GoFileUploader) uploadFile(server, filePath string) (string, error) {
 		if fi != nil {
 			fileSize = fi.Size()
 		}
-		progressFile := NewProgressReader(file, fileSize, "GoFile")
+		progressFile := NewProgressReaderWithCallback(file, fileSize, "GoFile", progress)
 
 		// Use a larger buffer for faster copying (1MB chunks)
 		buf := make([]byte, 1024*1024)

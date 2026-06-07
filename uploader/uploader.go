@@ -40,10 +40,13 @@ func newNoProxyClient(timeout time.Duration) *http.Client {
 // that reject chunked transfer encoding (Streamtape, Mixdrop, Pixeldrain) work.
 //
 // fields is written before the file part (may be nil).
-// If host is non-empty the file part is wrapped with a ProgressReader that
-// reports upload progress via the global callback.
+// If host is non-empty the file part is wrapped with a ProgressReader.
 // Returns: body reader, content-length, multipart content-type, closer (the opened file), error.
 func multipartStream(fields map[string]string, fileField, filePath, host string) (io.Reader, int64, string, io.Closer, error) {
+	return multipartStreamWithProgress(fields, fileField, filePath, host, nil)
+}
+
+func multipartStreamWithProgress(fields map[string]string, fileField, filePath, host string, progress ProgressFunc) (io.Reader, int64, string, io.Closer, error) {
 	fi, err := os.Stat(filePath)
 	if err != nil {
 		return nil, 0, "", nil, fmt.Errorf("stat: %w", err)
@@ -77,7 +80,7 @@ func multipartStream(fields map[string]string, fileField, filePath, host string)
 
 	var fileReader io.Reader = file
 	if host != "" {
-		fileReader = NewProgressReader(file, fi.Size(), host)
+		fileReader = NewProgressReaderWithCallback(file, fi.Size(), host, progress)
 	}
 
 	body := io.MultiReader(&preamble, fileReader, bytes.NewReader([]byte(closing)))
@@ -87,15 +90,15 @@ func multipartStream(fields map[string]string, fileField, filePath, host string)
 // Logger is the interface for logging upload events.
 // The channel package implements this with ch.Info/ch.Error.
 type Logger interface {
-        Info(format string, a ...any)
-        Error(format string, a ...any)
+	Info(format string, a ...any)
+	Error(format string, a ...any)
 }
 
 // UploadResult contains the result of an upload to a specific host
 type UploadResult struct {
-        Host         string
-        DownloadLink string
-        Error        error
+	Host         string
+	DownloadLink string
+	Error        error
 }
 
 // MultiHostUploader handles uploading to multiple hosts simultaneously
@@ -107,43 +110,49 @@ type MultiHostUploader struct {
 	pixeldrain *PixeldrainUploader
 	log        Logger
 	hosts      map[string]uploaderFunc // host name -> upload function, lazy-init
+	progress   ProgressFunc
 }
 
-type uploaderFunc func(string) (string, error)
+type uploaderFunc func(string, ProgressFunc) (string, error)
 
 func (m *MultiHostUploader) initHosts() {
 	if m.hosts != nil {
 		return
 	}
 	m.hosts = map[string]uploaderFunc{}
-	m.hosts["GoFile"] = m.gofile.Upload
+	m.hosts["GoFile"] = m.gofile.UploadWithProgress
 	if m.voesx != nil && m.voesx.apiKey != "" {
-		m.hosts["VOE.sx"] = m.voesx.Upload
+		m.hosts["VOE.sx"] = m.voesx.UploadWithProgress
 	}
 	if m.streamtape != nil && m.streamtape.login != "" && m.streamtape.key != "" {
-		m.hosts["Streamtape"] = m.streamtape.Upload
+		m.hosts["Streamtape"] = m.streamtape.UploadWithProgress
 	}
 	if m.mixdrop != nil && m.mixdrop.email != "" && m.mixdrop.token != "" {
-		m.hosts["Mixdrop"] = m.mixdrop.Upload
+		m.hosts["Mixdrop"] = m.mixdrop.UploadWithProgress
 	}
 	if m.pixeldrain != nil && m.pixeldrain.token != "" {
-		m.hosts["PixelDrain"] = m.pixeldrain.Upload
+		m.hosts["PixelDrain"] = m.pixeldrain.UploadWithProgress
 	}
 }
 
 // NewMultiHostUploader creates a new multi-host uploader
 func NewMultiHostUploader(voeSXAPIKey, streamtapeLogin, streamtapeKey, mixdropEmail, mixdropToken, pixeldrainToken string, log Logger) *MultiHostUploader {
-        if log == nil {
-                log = &nilLogger{}
-        }
-        return &MultiHostUploader{
-                gofile:     NewGoFileUploader(),
-                voesx:      NewVoeSXUploader(voeSXAPIKey),
-                streamtape: NewStreamtapeUploader(streamtapeLogin, streamtapeKey),
-                mixdrop:    NewMixdropUploader(mixdropEmail, mixdropToken),
-                pixeldrain: NewPixeldrainUploader(pixeldrainToken),
-                log:        log,
-        }
+	if log == nil {
+		log = &nilLogger{}
+	}
+	return &MultiHostUploader{
+		gofile:     NewGoFileUploader(),
+		voesx:      NewVoeSXUploader(voeSXAPIKey),
+		streamtape: NewStreamtapeUploader(streamtapeLogin, streamtapeKey),
+		mixdrop:    NewMixdropUploader(mixdropEmail, mixdropToken),
+		pixeldrain: NewPixeldrainUploader(pixeldrainToken),
+		log:        log,
+	}
+}
+
+// SetProgressCallback sets an upload-local progress callback for this uploader.
+func (m *MultiHostUploader) SetProgressCallback(fn ProgressFunc) {
+	m.progress = fn
 }
 
 const defaultUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
@@ -151,7 +160,7 @@ const defaultUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/
 // nilLogger discards all log messages when no logger is provided.
 type nilLogger struct{}
 
-func (n *nilLogger) Info(format string, a ...any) {}
+func (n *nilLogger) Info(format string, a ...any)  {}
 func (n *nilLogger) Error(format string, a ...any) {}
 
 // UploadToAll uploads a file to all configured hosts in parallel.
@@ -182,7 +191,7 @@ func (m *MultiHostUploader) UploadSelected(filePath string, hosts []string) []Up
 		go func(host string, fn uploaderFunc) {
 			defer wg.Done()
 			m.log.Info("upload: starting %s upload for %s", host, filePath)
-			link, err := fn(filePath)
+			link, err := fn(filePath, m.progress)
 			mu.Lock()
 			results = append(results, UploadResult{
 				Host:         host,
@@ -214,29 +223,29 @@ func (m *MultiHostUploader) AvailableHosts() []string {
 
 // GetSuccessfulUploads returns only the successful upload results
 func GetSuccessfulUploads(results []UploadResult) []UploadResult {
-        var successful []UploadResult
-        for _, result := range results {
-                if result.Error == nil && result.DownloadLink != "" {
-                        successful = append(successful, result)
-                }
-        }
-        return successful
+	var successful []UploadResult
+	for _, result := range results {
+		if result.Error == nil && result.DownloadLink != "" {
+			successful = append(successful, result)
+		}
+	}
+	return successful
 }
 
 // FormatResults formats upload results into a readable string
 func FormatResults(results []UploadResult) string {
-        var output string
-        successCount := 0
+	var output string
+	successCount := 0
 
-        for _, result := range results {
-                if result.Error == nil && result.DownloadLink != "" {
-                        output += fmt.Sprintf("✓ %s: %s\n", result.Host, result.DownloadLink)
-                        successCount++
-                } else {
-                        output += fmt.Sprintf("✗ %s: %v\n", result.Host, result.Error)
-                }
-        }
+	for _, result := range results {
+		if result.Error == nil && result.DownloadLink != "" {
+			output += fmt.Sprintf("✓ %s: %s\n", result.Host, result.DownloadLink)
+			successCount++
+		} else {
+			output += fmt.Sprintf("✗ %s: %v\n", result.Host, result.Error)
+		}
+	}
 
-        output = fmt.Sprintf("Upload completed: %d/%d successful\n%s", successCount, len(results), output)
-        return output
+	output = fmt.Sprintf("Upload completed: %d/%d successful\n%s", successCount, len(results), output)
+	return output
 }

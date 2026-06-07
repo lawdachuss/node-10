@@ -36,24 +36,24 @@ var dbClient *database.Client
 
 // GetDBClient returns the Supabase database client
 func GetDBClient() *database.Client {
-        if dbClient == nil && Config != nil && Config.SupabaseURL != "" && Config.SupabaseAPIKey != "" {
-                dbClient = database.NewClient(Config.SupabaseURL, Config.SupabaseAPIKey)
-        }
-        return dbClient
+	if dbClient == nil && Config != nil && Config.SupabaseURL != "" && Config.SupabaseAPIKey != "" {
+		dbClient = database.NewClient(Config.SupabaseURL, Config.SupabaseAPIKey)
+	}
+	return dbClient
 }
 
 func supabaseRestURL() string {
-        if Config == nil || Config.SupabaseURL == "" {
-                return ""
-        }
-        return Config.SupabaseURL + "/rest/v1"
+	if Config == nil || Config.SupabaseURL == "" {
+		return ""
+	}
+	return Config.SupabaseURL + "/rest/v1"
 }
 
 func supabaseRestAPIKey() string {
-        if Config == nil {
-                return ""
-        }
-        return Config.SupabaseAPIKey
+	if Config == nil {
+		return ""
+	}
+	return Config.SupabaseAPIKey
 }
 
 // supabaseRequest makes an authenticated REST call to Supabase with default
@@ -61,11 +61,11 @@ func supabaseRestAPIKey() string {
 // Prefer: resolution=merge-duplicates. Use supabaseRequestWithPrefer when you
 // need explicit control over the Prefer header.
 func supabaseRequest(method, path string, body []byte) (*http.Response, error) {
-        prefer := ""
-        if body != nil {
-                prefer = "resolution=merge-duplicates"
-        }
-        return supabaseRequestWithPrefer(method, path, body, prefer)
+	prefer := ""
+	if body != nil {
+		prefer = "resolution=merge-duplicates"
+	}
+	return supabaseRequestWithPrefer(method, path, body, prefer)
 }
 
 // Shared HTTP client with connection pooling for the supabaseRequest helper.
@@ -118,11 +118,11 @@ func supabaseRequestWithClient(method, path string, body []byte, prefer string, 
 
 // CheckSupabase verifies the app_settings table is reachable via the REST API.
 func CheckSupabase() error {
-        client := GetDBClient()
-        if client == nil {
-                return fmt.Errorf("Supabase not configured")
-        }
-        return client.HealthCheck()
+	client := GetDBClient()
+	if client == nil {
+		return fmt.Errorf("Supabase not configured")
+	}
+	return client.HealthCheck()
 }
 
 // ─── app_settings helpers ─────────────────────────────────────────────────────
@@ -135,54 +135,54 @@ func CheckSupabase() error {
 // reliable than the upsert POST+on_conflict approach, which silently skips the
 // UPDATE when certain Prefer header combinations are used.
 func saveJSONSetting(key string, data []byte) error {
-        var rawJSON json.RawMessage
-        if err := json.Unmarshal(data, &rawJSON); err != nil {
-                return fmt.Errorf("parse json: %w", err)
-        }
+	var rawJSON json.RawMessage
+	if err := json.Unmarshal(data, &rawJSON); err != nil {
+		return fmt.Errorf("parse json: %w", err)
+	}
 
-        // Build separate bodies: the UPDATE only touches value; the INSERT needs key too.
-        updateBody, err := json.Marshal(map[string]interface{}{"value": rawJSON})
-        if err != nil {
-                return fmt.Errorf("marshal update body: %w", err)
-        }
-        insertBody, err := json.Marshal(map[string]interface{}{"key": key, "value": rawJSON})
-        if err != nil {
-                return fmt.Errorf("marshal insert body: %w", err)
-        }
+	// Build separate bodies: the UPDATE only touches value; the INSERT needs key too.
+	updateBody, err := json.Marshal(map[string]interface{}{"value": rawJSON})
+	if err != nil {
+		return fmt.Errorf("marshal update body: %w", err)
+	}
+	insertBody, err := json.Marshal(map[string]interface{}{"key": key, "value": rawJSON})
+	if err != nil {
+		return fmt.Errorf("marshal insert body: %w", err)
+	}
 
-        // Try PATCH first. Ask for the representation so we can tell whether any
-        // row was actually matched (empty array ⟹ no row yet).
-        patchResp, err := supabaseRequestWithPrefer(
-                "PATCH", "/app_settings?key=eq."+key,
-                updateBody, "return=representation",
-        )
-        if err != nil {
-                return fmt.Errorf("patch request: %w", err)
-        }
-        defer patchResp.Body.Close()
-        patchRespBody, _ := io.ReadAll(patchResp.Body)
-        if patchResp.StatusCode >= 400 {
-                return fmt.Errorf("patch returned %d: %s", patchResp.StatusCode, string(patchRespBody))
-        }
+	// Try PATCH first. Ask for the representation so we can tell whether any
+	// row was actually matched (empty array ⟹ no row yet).
+	patchResp, err := supabaseRequestWithPrefer(
+		"PATCH", "/app_settings?key=eq."+key,
+		updateBody, "return=representation",
+	)
+	if err != nil {
+		return fmt.Errorf("patch request: %w", err)
+	}
+	defer patchResp.Body.Close()
+	patchRespBody, _ := io.ReadAll(patchResp.Body)
+	if patchResp.StatusCode >= 400 {
+		return fmt.Errorf("patch returned %d: %s", patchResp.StatusCode, string(patchRespBody))
+	}
 
-        // Supabase returns "[]" when PATCH matched zero rows.
-        if strings.TrimSpace(string(patchRespBody)) == "[]" {
-                // Row doesn't exist yet — INSERT it.
-                insertResp, err := supabaseRequestWithPrefer("POST", "/app_settings", insertBody, "return=minimal")
-                if err != nil {
-                        return fmt.Errorf("insert request: %w", err)
-                }
-                defer insertResp.Body.Close()
-                if insertResp.StatusCode >= 400 {
-                        b, _ := io.ReadAll(insertResp.Body)
-                        return fmt.Errorf("insert returned %d: %s", insertResp.StatusCode, string(b))
-                }
-                fmt.Printf("[DEBUG] saveJSONSetting(%q): inserted new row\n", key)
-                return nil
-        }
+	// Supabase returns "[]" when PATCH matched zero rows.
+	if strings.TrimSpace(string(patchRespBody)) == "[]" {
+		// Row doesn't exist yet — INSERT it.
+		insertResp, err := supabaseRequestWithPrefer("POST", "/app_settings", insertBody, "return=minimal")
+		if err != nil {
+			return fmt.Errorf("insert request: %w", err)
+		}
+		defer insertResp.Body.Close()
+		if insertResp.StatusCode >= 400 {
+			b, _ := io.ReadAll(insertResp.Body)
+			return fmt.Errorf("insert returned %d: %s", insertResp.StatusCode, string(b))
+		}
+		fmt.Printf("[DEBUG] saveJSONSetting(%q): inserted new row\n", key)
+		return nil
+	}
 
-        fmt.Printf("[DEBUG] saveJSONSetting(%q): updated existing row (%d bytes)\n", key, len(patchRespBody))
-        return nil
+	fmt.Printf("[DEBUG] saveJSONSetting(%q): updated existing row (%d bytes)\n", key, len(patchRespBody))
+	return nil
 }
 
 // loadJSONSetting reads a JSON value from the app_settings table via REST.
@@ -240,10 +240,10 @@ func loadJSONSettingWithClient(key string, client *http.Client) []byte {
 // a background goroutine so it never blocks the HTTP handler. Stale rows here
 // are harmless because LoadChannelsFromDB reads from app_settings first.
 func SaveChannelsToDB(data []byte) error {
-        client := GetDBClient()
-        if client == nil {
-                return fmt.Errorf("Supabase not configured")
-        }
+	client := GetDBClient()
+	if client == nil {
+		return fmt.Errorf("Supabase not configured")
+	}
 
 	// ── Primary (blocking): update the authoritative channel list blob. ──────
 	if err := saveJSONSetting(channelsKey(), data); err != nil {
@@ -257,31 +257,31 @@ func SaveChannelsToDB(data []byte) error {
 	// LoadChannelsFromDB (the fallback was removed). They are kept only for
 	// backward compatibility with external tools that query the channels table.
 	dataCopy := make([]byte, len(data))
-        copy(dataCopy, data)
-        go func() {
-                var configs []*entity.ChannelConfig
-                if err := json.Unmarshal(dataCopy, &configs); err != nil {
-                        return
-                }
-                for _, conf := range configs {
-                        ch := &database.Channel{
-                                Username:    conf.Username,
-                                IsPaused:    conf.IsPaused.Load(),
-                                Framerate:   conf.Framerate,
-                                Resolution:  conf.Resolution,
-                                Pattern:     conf.Pattern,
-                                MaxDuration: conf.MaxDuration,
-                                MaxFilesize: conf.MaxFilesize,
-                                Compress:    conf.Compress,
-                                CreatedAt:   conf.CreatedAt,
-                        }
-                        if err := client.SaveChannel(ch); err != nil {
-                                fmt.Printf("[WARN] SaveChannelsToDB: failed to sync channel %s to channels table: %v\n", conf.Username, err)
-                        }
-                }
-        }()
+	copy(dataCopy, data)
+	go func() {
+		var configs []*entity.ChannelConfig
+		if err := json.Unmarshal(dataCopy, &configs); err != nil {
+			return
+		}
+		for _, conf := range configs {
+			ch := &database.Channel{
+				Username:    conf.Username,
+				IsPaused:    conf.IsPaused.Load(),
+				Framerate:   conf.Framerate,
+				Resolution:  conf.Resolution,
+				Pattern:     conf.Pattern,
+				MaxDuration: conf.MaxDuration,
+				MaxFilesize: conf.MaxFilesize,
+				Compress:    conf.Compress,
+				CreatedAt:   conf.CreatedAt,
+			}
+			if err := client.SaveChannel(ch); err != nil {
+				fmt.Printf("[WARN] SaveChannelsToDB: failed to sync channel %s to channels table: %v\n", conf.Username, err)
+			}
+		}
+	}()
 
-        return nil
+	return nil
 }
 
 // LoadChannelsFromDB loads channels from Supabase.
@@ -309,10 +309,10 @@ func LoadChannelsFromDB() []byte {
 // ─── Settings ─────────────────────────────────────────────────────────────────
 
 func SaveSettingsToDB(data []byte) error {
-        if err := saveJSONSetting("dvr_settings", data); err != nil {
-                return fmt.Errorf("save settings to Supabase: %w", err)
-        }
-        return nil
+	if err := saveJSONSetting("dvr_settings", data); err != nil {
+		return fmt.Errorf("save settings to Supabase: %w", err)
+	}
+	return nil
 }
 
 func LoadSettingsFromDB() []byte {
@@ -325,92 +325,92 @@ func LoadSettingsFromDB() []byte {
 
 // SaveRecordingsToDB saves recordings to Supabase
 func SaveRecordingsToDB(data []byte) error {
-        client := GetDBClient()
-        if client == nil {
-                return fmt.Errorf("Supabase not configured")
-        }
+	client := GetDBClient()
+	if client == nil {
+		return fmt.Errorf("Supabase not configured")
+	}
 
 	// Parse the JSON data
-		type RecordingEntry struct {
-			Filename     string            `json:"filename"`
-			Timestamp    string            `json:"timestamp"`
-			RoomTitle    string            `json:"room_title"`
-			Tags         []string          `json:"tags"`
-			Viewers      int               `json:"viewers"`
-			Resolution   string            `json:"resolution"`
-			Framerate    int               `json:"framerate"`
-			Links        map[string]string `json:"links"`
-			ThumbnailURL string            `json:"thumbnail_url"`
-			SpriteURL    string            `json:"sprite_url"`
-			PreviewURL   string            `json:"preview_url"`
-			EmbedURL     string            `json:"embed_url"`
-			Filesize     int64             `json:"filesize"`
-		}
+	type RecordingEntry struct {
+		Filename     string            `json:"filename"`
+		Timestamp    string            `json:"timestamp"`
+		RoomTitle    string            `json:"room_title"`
+		Tags         []string          `json:"tags"`
+		Viewers      int               `json:"viewers"`
+		Resolution   string            `json:"resolution"`
+		Framerate    int               `json:"framerate"`
+		Links        map[string]string `json:"links"`
+		ThumbnailURL string            `json:"thumbnail_url"`
+		SpriteURL    string            `json:"sprite_url"`
+		PreviewURL   string            `json:"preview_url"`
+		EmbedURL     string            `json:"embed_url"`
+		Filesize     int64             `json:"filesize"`
+	}
 
-		type ChannelRecordings struct {
-			Gender     string            `json:"gender"`
-			Recordings []RecordingEntry  `json:"recordings"`
-		}
+	type ChannelRecordings struct {
+		Gender     string           `json:"gender"`
+		Recordings []RecordingEntry `json:"recordings"`
+	}
 
-		type RecordingsDB struct {
-			Version  int                          `json:"version"`
-			Channels map[string]*ChannelRecordings `json:"channels"`
-		}
+	type RecordingsDB struct {
+		Version  int                           `json:"version"`
+		Channels map[string]*ChannelRecordings `json:"channels"`
+	}
 
-        var db RecordingsDB
-        if err := json.Unmarshal(data, &db); err != nil {
-                return fmt.Errorf("parse recordings: %w", err)
-        }
+	var db RecordingsDB
+	if err := json.Unmarshal(data, &db); err != nil {
+		return fmt.Errorf("parse recordings: %w", err)
+	}
 
-        for username, chanData := range db.Channels {
-                for _, rec := range chanData.Recordings {
-                        recording := &database.Recording{
-                                Username:     username,
-                                Filename:     rec.Filename,
-                                Timestamp:    rec.Timestamp,
-                                RoomTitle:    rec.RoomTitle,
-                                Tags:         rec.Tags,
-                                Viewers:      rec.Viewers,
-                                Resolution:   rec.Resolution,
-                                Framerate:    rec.Framerate,
-                                Filesize:     rec.Filesize,
-                                Gender:       chanData.Gender,
-                                ThumbnailURL: rec.ThumbnailURL,
-                                SpriteURL:    rec.SpriteURL,
-                                EmbedURL:     rec.EmbedURL,
-                        }
+	for username, chanData := range db.Channels {
+		for _, rec := range chanData.Recordings {
+			recording := &database.Recording{
+				Username:     username,
+				Filename:     rec.Filename,
+				Timestamp:    rec.Timestamp,
+				RoomTitle:    rec.RoomTitle,
+				Tags:         rec.Tags,
+				Viewers:      rec.Viewers,
+				Resolution:   rec.Resolution,
+				Framerate:    rec.Framerate,
+				Filesize:     rec.Filesize,
+				Gender:       chanData.Gender,
+				ThumbnailURL: rec.ThumbnailURL,
+				SpriteURL:    rec.SpriteURL,
+				EmbedURL:     rec.EmbedURL,
+			}
 
-                        if err := client.SaveRecording(recording); err != nil {
-                                return fmt.Errorf("save recording %s: %w", rec.Filename, err)
-                        }
+			if err := client.SaveRecording(recording); err != nil {
+				return fmt.Errorf("save recording %s: %w", rec.Filename, err)
+			}
 
-                        savedRec, err := client.GetRecording(rec.Filename)
-                        if err != nil {
-                                return fmt.Errorf("get recording %s after save: %w", rec.Filename, err)
-                        }
+			savedRec, err := client.GetRecording(rec.Filename)
+			if err != nil {
+				return fmt.Errorf("get recording %s after save: %w", rec.Filename, err)
+			}
 
-                        for host, url := range rec.Links {
-                                link := &database.UploadLink{
-                                        RecordingID: savedRec.ID,
-                                        Host:        host,
-                                        URL:         url,
-                                }
-                                if err := client.SaveUploadLink(link); err != nil {
-                                        return fmt.Errorf("save upload link %s/%s: %w", rec.Filename, host, err)
-                                }
-                        }
+			for host, url := range rec.Links {
+				link := &database.UploadLink{
+					RecordingID: savedRec.ID,
+					Host:        host,
+					URL:         url,
+				}
+				if err := client.SaveUploadLink(link); err != nil {
+					return fmt.Errorf("save upload link %s/%s: %w", rec.Filename, host, err)
+				}
+			}
 
-                        if rec.ThumbnailURL != "" || rec.SpriteURL != "" {
-                                img := &database.PreviewImage{
-                                        RecordingID:  savedRec.ID,
-                                        Filename:     rec.Filename,
-                                        ThumbnailURL: rec.ThumbnailURL,
-                                        SpriteURL:    rec.SpriteURL,
-                                }
-                                if err := client.SavePreviewImage(img); err != nil {
-                                        return fmt.Errorf("save preview image %s: %w", rec.Filename, err)
-                                }
-                        }
+			if rec.ThumbnailURL != "" || rec.SpriteURL != "" {
+				img := &database.PreviewImage{
+					RecordingID:  savedRec.ID,
+					Filename:     rec.Filename,
+					ThumbnailURL: rec.ThumbnailURL,
+					SpriteURL:    rec.SpriteURL,
+				}
+				if err := client.SavePreviewImage(img); err != nil {
+					return fmt.Errorf("save preview image %s: %w", rec.Filename, err)
+				}
+			}
 		}
 	}
 
@@ -436,31 +436,31 @@ func LoadRecordingsFromDB() []byte {
 	}
 
 	// Convert to the old JSON format for compatibility
-		type RecordingEntry struct {
-			Filename     string            `json:"filename"`
-			Timestamp    string            `json:"timestamp"`
-			RoomTitle    string            `json:"room_title"`
-			Tags         []string          `json:"tags"`
-			Viewers      int               `json:"viewers"`
-			Resolution   string            `json:"resolution"`
-			Framerate    int               `json:"framerate"`
-			Links        map[string]string `json:"links"`
-			ThumbnailURL string            `json:"thumbnail_url"`
-			SpriteURL    string            `json:"sprite_url"`
-			PreviewURL   string            `json:"preview_url"`
-			EmbedURL     string            `json:"embed_url"`
-			Filesize     int64             `json:"filesize"`
-		}
+	type RecordingEntry struct {
+		Filename     string            `json:"filename"`
+		Timestamp    string            `json:"timestamp"`
+		RoomTitle    string            `json:"room_title"`
+		Tags         []string          `json:"tags"`
+		Viewers      int               `json:"viewers"`
+		Resolution   string            `json:"resolution"`
+		Framerate    int               `json:"framerate"`
+		Links        map[string]string `json:"links"`
+		ThumbnailURL string            `json:"thumbnail_url"`
+		SpriteURL    string            `json:"sprite_url"`
+		PreviewURL   string            `json:"preview_url"`
+		EmbedURL     string            `json:"embed_url"`
+		Filesize     int64             `json:"filesize"`
+	}
 
-		type ChannelRecordings struct {
-			Gender     string            `json:"gender"`
-			Recordings []RecordingEntry  `json:"recordings"`
-		}
+	type ChannelRecordings struct {
+		Gender     string           `json:"gender"`
+		Recordings []RecordingEntry `json:"recordings"`
+	}
 
-		type RecordingsDB struct {
-			Version  int                          `json:"version"`
-			Channels map[string]*ChannelRecordings `json:"channels"`
-		}
+	type RecordingsDB struct {
+		Version  int                           `json:"version"`
+		Channels map[string]*ChannelRecordings `json:"channels"`
+	}
 
 	// Batch-fetch all upload links at once, grouped by recording_id
 	allUploadLinks := map[string]map[string]string{} // recording_id → {host: url}
@@ -526,6 +526,15 @@ func LoadRecordingsFromDB() []byte {
 	return data
 }
 
+func RecordingExists(filename string) bool {
+	client := GetDBClient()
+	if client == nil {
+		return false
+	}
+	_, err := client.GetRecording(filename)
+	return err == nil
+}
+
 // SaveRecordingWithLinks saves a recording and its upload links directly to Supabase.
 // Preview URLs should be saved separately via SavePreviewLinks before calling this.
 // This function only saves the recording metadata and upload links.
@@ -558,40 +567,40 @@ func SaveRecordingWithLinks(username, filename, timestamp, roomTitle string, tag
 	// Recordings are uniquely identified by filename, so channel_id is cosmetic.
 
 	// Save recording first (try with duration, fall back without if column missing)
-        if err := client.SaveRecording(rec); err != nil && strings.Contains(err.Error(), "PGRST204") {
-                fmt.Printf("[WARN] duration column missing in Supabase — saving without duration: %v\n", err)
-                rec.Duration = 0
-                if err := client.SaveRecording(rec); err != nil {
-                        return fmt.Errorf("save recording (fallback): %w", err)
-                }
-        } else if err != nil {
-                return fmt.Errorf("save recording: %w", err)
-        }
+	if err := client.SaveRecording(rec); err != nil && strings.Contains(err.Error(), "PGRST204") {
+		fmt.Printf("[WARN] duration column missing in Supabase — saving without duration: %v\n", err)
+		rec.Duration = 0
+		if err := client.SaveRecording(rec); err != nil {
+			return fmt.Errorf("save recording (fallback): %w", err)
+		}
+	} else if err != nil {
+		return fmt.Errorf("save recording: %w", err)
+	}
 
-        // Get the saved recording to get its ID for upload links
-        savedRec, err := client.GetRecording(filename)
-        if err != nil {
-                return fmt.Errorf("get recording after save: %w", err)
-        }
+	// Get the saved recording to get its ID for upload links
+	savedRec, err := client.GetRecording(filename)
+	if err != nil {
+		return fmt.Errorf("get recording after save: %w", err)
+	}
 
-        // Save upload links — batch upsert is atomic: either all succeed or
-        // none do, so partial failures cannot orphan individual host URLs.
-        var uploadLinks []database.UploadLink
-        for host, url := range links {
-                uploadLinks = append(uploadLinks, database.UploadLink{
-                        RecordingID: savedRec.ID,
-                        Host:        host,
-                        URL:         url,
-                })
-        }
-        if len(uploadLinks) > 0 {
-                if err := client.SaveUploadLinks(uploadLinks); err != nil {
-                        return fmt.Errorf("save upload links: %w", err)
-                }
-        }
+	// Save upload links — batch upsert is atomic: either all succeed or
+	// none do, so partial failures cannot orphan individual host URLs.
+	var uploadLinks []database.UploadLink
+	for host, url := range links {
+		uploadLinks = append(uploadLinks, database.UploadLink{
+			RecordingID: savedRec.ID,
+			Host:        host,
+			URL:         url,
+		})
+	}
+	if len(uploadLinks) > 0 {
+		if err := client.SaveUploadLinks(uploadLinks); err != nil {
+			return fmt.Errorf("save upload links: %w", err)
+		}
+	}
 
-        cacheClear()
-        return nil
+	cacheClear()
+	return nil
 }
 
 // ─── Pipeline States ──────────────────────────────────────────────────────────
@@ -737,21 +746,21 @@ func LoadAllPreviewLinks() map[string][3]string {
 
 // DeleteChannelFromDB removes a channel record from Supabase.
 func DeleteChannelFromDB(username string) error {
-        client := GetDBClient()
-        if client == nil {
-                return nil
-        }
-        return client.DeleteChannel(username)
+	client := GetDBClient()
+	if client == nil {
+		return nil
+	}
+	return client.DeleteChannel(username)
 }
 
 // DeleteChannelsNotInDB removes all Supabase channel rows whose username is NOT
 // in the provided list. Pass an empty slice to delete all channels.
 func DeleteChannelsNotInDB(usernames []string) error {
-        client := GetDBClient()
-        if client == nil {
-                return nil
-        }
-        return client.DeleteChannelsNotIn(usernames)
+	client := GetDBClient()
+	if client == nil {
+		return nil
+	}
+	return client.DeleteChannelsNotIn(usernames)
 }
 
 // UpdateRecordingThumbnails patches the thumbnail_url, sprite_url and preview_url on an
@@ -789,92 +798,92 @@ func UpdateRecordingThumbnails(filename, thumbnailURL, spriteURL, previewURL str
 // - Upload links from Supabase upload_links table
 // Returns a combined error if any deletion fails.
 func DeleteVideoCompletely(filename string) error {
-        client := GetDBClient()
-        if client == nil {
-                return nil // No DB configured, nothing to delete
-        }
+	client := GetDBClient()
+	if client == nil {
+		return nil // No DB configured, nothing to delete
+	}
 
-        var errs []string
+	var errs []string
 
-        // Get recording ID first (needed for upload links)
-        rec, err := client.GetRecording(filename)
-        if err == nil && rec != nil {
-                // Delete upload links by recording ID
-                if err := client.DeleteUploadLinksByRecordingID(rec.ID); err != nil {
-                        errs = append(errs, fmt.Sprintf("upload links: %v", err))
-                }
-        }
+	// Get recording ID first (needed for upload links)
+	rec, err := client.GetRecording(filename)
+	if err == nil && rec != nil {
+		// Delete upload links by recording ID
+		if err := client.DeleteUploadLinksByRecordingID(rec.ID); err != nil {
+			errs = append(errs, fmt.Sprintf("upload links: %v", err))
+		}
+	}
 
-        // Delete preview images
-        if err := client.DeletePreviewImage(filename); err != nil {
-                errs = append(errs, fmt.Sprintf("preview images: %v", err))
-        }
+	// Delete preview images
+	if err := client.DeletePreviewImage(filename); err != nil {
+		errs = append(errs, fmt.Sprintf("preview images: %v", err))
+	}
 
-        // Delete recording
-        if err := client.DeleteRecording(filename); err != nil {
-                errs = append(errs, fmt.Sprintf("recording: %v", err))
-        }
+	// Delete recording
+	if err := client.DeleteRecording(filename); err != nil {
+		errs = append(errs, fmt.Sprintf("recording: %v", err))
+	}
 
-        if len(errs) > 0 {
-                return fmt.Errorf("delete errors: %s", strings.Join(errs, "; "))
-        }
+	if len(errs) > 0 {
+		return fmt.Errorf("delete errors: %s", strings.Join(errs, "; "))
+	}
 
-        cacheClear()
-        return nil
+	cacheClear()
+	return nil
 }
 
 // ─── Upload Journal ───────────────────────────────────────────────────────────
 
 // SaveJournalEntry records the upload state for a file on a specific host.
 func SaveJournalEntry(fileHash, filename, host, status string, fileSize int64, errMsg string) error {
-        client := GetDBClient()
-        if client == nil {
-                return fmt.Errorf("Supabase not configured")
-        }
+	client := GetDBClient()
+	if client == nil {
+		return fmt.Errorf("Supabase not configured")
+	}
 
-        entry := &database.UploadJournal{
-                FileHash:   fileHash,
-                Filename:   filename,
-                Host:       host,
-                Status:     status,
-                ErrorMsg:   errMsg,
-                FileSize:   fileSize,
-                InstanceID: instanceID,
-        }
+	entry := &database.UploadJournal{
+		FileHash:   fileHash,
+		Filename:   filename,
+		Host:       host,
+		Status:     status,
+		ErrorMsg:   errMsg,
+		FileSize:   fileSize,
+		InstanceID: instanceID,
+	}
 
-        return client.SaveJournalEntry(entry)
+	return client.SaveJournalEntry(entry)
 }
 
 // LoadJournalByHash returns all journal entries for a given file hash.
 func LoadJournalByHash(fileHash string) ([]database.UploadJournal, error) {
-        client := GetDBClient()
-        if client == nil {
-                return nil, fmt.Errorf("Supabase not configured")
-        }
-        return client.GetJournalByHash(fileHash)
+	client := GetDBClient()
+	if client == nil {
+		return nil, fmt.Errorf("Supabase not configured")
+	}
+	return client.GetJournalByHash(fileHash)
 }
 
 // LoadCompletedHosts returns the list of hosts that have successfully received
 // the file identified by fileHash.
 func LoadCompletedHosts(fileHash string) ([]string, error) {
-        entries, err := LoadJournalByHash(fileHash)
-        if err != nil {
-                return nil, err
-        }
-        var hosts []string
-        for _, e := range entries {
-                if e.Status == "success" {
-                        hosts = append(hosts, e.Host)
-                }
-        }
-        return hosts, nil
+	entries, err := LoadJournalByHash(fileHash)
+	if err != nil {
+		return nil, err
+	}
+	var hosts []string
+	for _, e := range entries {
+		if e.Status == "success" {
+			hosts = append(hosts, e.Host)
+		}
+	}
+	return hosts, nil
 }
 
 // DeleteJournalByHash removes all journal entries for a file hash.
 func DeleteJournalByHash(fileHash string) error {
-        client := GetDBClient()
-        if client == nil {
-                return nil
-        }
-        return client.DeleteJournalByHash(fileHash)
+	client := GetDBClient()
+	if client == nil {
+		return nil
+	}
+	return client.DeleteJournalByHash(fileHash)
 }

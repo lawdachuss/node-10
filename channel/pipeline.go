@@ -162,7 +162,7 @@ func (p *Pipeline) stageThumbnail(ch *Channel) error {
 func (p *Pipeline) stageUploadVideos(ch *Channel) error {
 	cfg := server.Config
 	if cfg == nil {
-		return nil
+		return fmt.Errorf("server config not loaded")
 	}
 
 	filename := p.Filename
@@ -195,16 +195,25 @@ func (p *Pipeline) stageUploadVideos(ch *Channel) error {
 
 	allHosts := upl.AvailableHosts()
 	if len(allHosts) == 0 {
-		ch.Warn("upload: no hosts configured for %s", filename)
-		return nil
+		return fmt.Errorf("no upload hosts configured for %s", filename)
 	}
 
 	hostsToTry := allHosts
 	if len(completedHosts) > 0 {
 		hostsToTry = difference(allHosts, completedHosts)
 		if len(hostsToTry) == 0 {
-			ch.Info("upload: all hosts already have %s per journal", filename)
-			return nil
+			if len(p.Links) > 0 {
+				ch.Info("upload: all hosts already have %s per journal", filename)
+				return nil
+			}
+			ch.Warn("upload: stale journal for %s has no saved links; clearing journal and re-uploading", filename)
+			if p.FileHash != "" {
+				if jErr := server.DeleteJournalByHash(p.FileHash); jErr != nil {
+					ch.Warn("upload: could not clear stale journal for %s: %v", filename, jErr)
+				}
+			}
+			completedHosts = nil
+			hostsToTry = allHosts
 		}
 		ch.Info("upload: %d/%d hosts already have this file — uploading to %d remaining",
 			len(completedHosts), len(allHosts), len(hostsToTry))
@@ -213,7 +222,7 @@ func (p *Pipeline) stageUploadVideos(ch *Channel) error {
 	var results []uploader.UploadResult
 	var success []uploader.UploadResult
 
-	// Set up global progress callback for live UI tracking.
+	// Set up per-upload progress callback for live UI tracking.
 	// The callback is called from each uploader's goroutine as bytes are sent.
 	hostProgress := make(map[string]struct {
 		bytes    int64
@@ -221,7 +230,7 @@ func (p *Pipeline) stageUploadVideos(ch *Channel) error {
 		lastTime time.Time
 	})
 	var hostMu sync.Mutex
-	uploader.SetProgressCallback(func(host string, current, total int64) {
+	upl.SetProgressCallback(func(host string, current, total int64) {
 		hostMu.Lock()
 		hp, ok := hostProgress[host]
 		if !ok {
@@ -302,7 +311,6 @@ func (p *Pipeline) stageUploadVideos(ch *Channel) error {
 		status := fmt.Sprintf("uploading to %s (%.0f%%) — %d/%d hosts done", host, pct, hostCount, len(allHosts))
 		ch.SetUploadProgress(filename, status, pct/float64(len(allHosts)), hostCount, len(allHosts), totalCur, totalBytes, aggSpeed, hosts)
 	})
-	defer uploader.ClearProgressCallback()
 
 	for attempt := 1; attempt <= maxChannelUploadAttempts; attempt++ {
 		if attempt > 1 && len(hostsToTry) == 0 {
@@ -353,7 +361,7 @@ func (p *Pipeline) stageUploadVideos(ch *Channel) error {
 
 	if len(success) == 0 {
 		ch.Error("upload: all hosts failed for %s", filename)
-		return nil
+		return fmt.Errorf("all upload hosts failed for %s", filename)
 	}
 
 	// Store results
@@ -399,8 +407,7 @@ func (p *Pipeline) stageSaveMetadata(ch *Channel) error {
 	}
 
 	if len(p.Links) == 0 {
-		ch.Warn("upload: no upload links to save for %s — skipping metadata", p.Filename)
-		return nil
+		return fmt.Errorf("no upload links to save for %s", p.Filename)
 	}
 
 	timestamp := extractTimestampFromFilename(p.Filename)
@@ -461,6 +468,12 @@ func (p *Pipeline) stageCleanup(ch *Channel) error {
 		return nil
 	}
 
+	if !p.hasAllConfiguredHosts() {
+		ch.Info("cleanup: keeping %s because only %d/%d configured hosts uploaded",
+			p.Filename, len(p.Links), len(configuredUploadHosts()))
+		return nil
+	}
+
 	ch.Info("cleanup: removing local files for %s", p.Filename)
 	if err := os.Remove(p.FilePath); err != nil && !os.IsNotExist(err) {
 		ch.Error("cleanup: could not remove %s: %v", p.Filename, err)
@@ -475,6 +488,19 @@ func (p *Pipeline) stageCleanup(ch *Channel) error {
 	}
 	ch.Info("cleanup: removed local files for %s", p.Filename)
 	return nil
+}
+
+func (p *Pipeline) hasAllConfiguredHosts() bool {
+	hosts := configuredUploadHosts()
+	if len(hosts) == 0 {
+		return false
+	}
+	for _, host := range hosts {
+		if p.Links[host] == "" {
+			return false
+		}
+	}
+	return true
 }
 
 // PipelineQueue manages a per-channel ordered queue of pipelines.
@@ -547,7 +573,7 @@ func (pq *PipelineQueue) processLoop() {
 		for len(pq.pipelines) == 0 && !pq.stopped {
 			pq.cond.Wait()
 		}
-		if pq.stopped {
+		if pq.stopped && len(pq.pipelines) == 0 {
 			pq.mu.Unlock()
 			return
 		}
@@ -603,6 +629,8 @@ func (pq *PipelineQueue) pushHistory(e entity.PendingEntry) {
 func (pq *PipelineQueue) processPipeline(p *Pipeline) {
 	ch := pq.ch
 	filename := p.Filename
+	p.Failed = false
+	p.LastError = ""
 	ch.SetUploadProgress(filename, "queued for processing", 0, 0, 0, 0, 0, "", nil)
 	ch.Info("pipeline: processing %s (starting at stage %s)", filename, p.CurrentStage)
 
@@ -613,6 +641,7 @@ func (pq *PipelineQueue) processPipeline(p *Pipeline) {
 			p.LastError = fmt.Sprintf("panic: %v", r)
 		}
 		ch.UploadWg.Done()
+		MarkUploadDone(p.FilePath)
 		// Record history
 		stageStr := p.CurrentStage.String()
 		if p.Failed || p.CurrentStage == StageDone {
@@ -634,7 +663,6 @@ func (pq *PipelineQueue) processPipeline(p *Pipeline) {
 					ch.Warn("pipeline: could not persist state for %s: %v", filename, saveErr)
 				}
 			}
-			MarkUploadDone(p.FilePath)
 			if m := server.Manager; m != nil {
 				m.PublishLog(ch.Config.Username, fmt.Sprintf("[pipeline] %s finished (stage=%s, failed=%v)", filename, p.CurrentStage, p.Failed))
 			}
@@ -682,14 +710,24 @@ func (pq *PipelineQueue) processPipeline(p *Pipeline) {
 		}
 		if uploadErr != nil {
 			ch.Error("pipeline: upload stage failed for %s: %v", filename, uploadErr)
+			p.Failed = true
+			p.LastError = uploadErr.Error()
+			return
+		}
+		if len(p.Links) == 0 {
+			ch.Error("pipeline: upload stage produced no links for %s", filename)
+			p.Failed = true
+			p.LastError = "upload produced no links"
+			return
 		}
 
-		// Advance only if file still exists and we have something to show
 		if _, statErr := os.Stat(p.FilePath); statErr == nil {
 			p.advanceTo(StageSaveMetadata)
 		} else {
-			ch.Warn("pipeline: file %s disappeared during processing", filename)
-			p.advanceTo(StageCleanup)
+			ch.Error("pipeline: file %s disappeared during processing: %v", filename, statErr)
+			p.Failed = true
+			p.LastError = statErr.Error()
+			return
 		}
 	}
 
@@ -699,6 +737,9 @@ func (pq *PipelineQueue) processPipeline(p *Pipeline) {
 		ch.SetUploadProgress(filename, "saving recording metadata", 90, len(p.Links), len(p.Links), 0, 0, "", nil)
 		if err := p.stageSaveMetadata(ch); err != nil {
 			ch.Error("pipeline: metadata stage failed for %s: %v", filename, err)
+			p.Failed = true
+			p.LastError = err.Error()
+			return
 		}
 		p.advanceTo(StageCleanup)
 	}
@@ -709,6 +750,9 @@ func (pq *PipelineQueue) processPipeline(p *Pipeline) {
 		ch.SetUploadProgress(filename, "cleaning up local files", 95, len(p.Links), len(p.Links), 0, 0, "", nil)
 		if err := p.stageCleanup(ch); err != nil {
 			ch.Error("pipeline: cleanup stage failed for %s: %v", filename, err)
+			p.Failed = true
+			p.LastError = err.Error()
+			return
 		}
 		p.advanceTo(StageDone)
 	}
@@ -786,6 +830,13 @@ func (pq *PipelineQueue) ResumePending() {
 	pq.startOnce()
 	for _, s := range states {
 		if s.FileHash == "" {
+			continue
+		}
+		username := s.Username
+		if username == "" {
+			username = extractUsernameFromFilename(s.Filename)
+		}
+		if username != "" && username != pq.ch.Config.Username {
 			continue
 		}
 		// Check file still exists

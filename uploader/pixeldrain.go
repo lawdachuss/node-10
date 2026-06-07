@@ -47,6 +47,11 @@ func NewPixeldrainUploader(token string) *PixeldrainUploader {
 // file body and an explicit Content-Length. This avoids chunked transfer
 // encoding, which PixelDrain's API does not support reliably.
 func (u *PixeldrainUploader) Upload(filePath string) (string, error) {
+	return u.UploadWithProgress(filePath, nil)
+}
+
+// UploadWithProgress uploads a file to PixelDrain and reports progress through fn.
+func (u *PixeldrainUploader) UploadWithProgress(filePath string, progress ProgressFunc) (string, error) {
 	pixeldrainSem <- struct{}{}
 	defer func() { <-pixeldrainSem }()
 
@@ -65,7 +70,7 @@ func (u *PixeldrainUploader) Upload(filePath string) (string, error) {
 	url := fmt.Sprintf("https://pixeldrain.com/api/file/%s", name)
 
 	// Wrap file with ProgressReader for live upload tracking
-	progressFile := NewProgressReader(file, fi.Size(), "PixelDrain")
+	progressFile := NewProgressReaderWithCallback(file, fi.Size(), "PixelDrain", progress)
 	req, err := http.NewRequest("PUT", url, progressFile)
 	if err != nil {
 		return "", fmt.Errorf("create request: %w", err)

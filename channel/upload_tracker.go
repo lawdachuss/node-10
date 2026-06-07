@@ -1,6 +1,9 @@
 package channel
 
-import "sync"
+import (
+	"path/filepath"
+	"sync"
+)
 
 var (
 	pendingUploadsMu sync.Mutex
@@ -12,6 +15,7 @@ var (
 // file and skips it when this returns true, preventing duplicate uploads
 // and the "file not found" race when DeleteLocalAfterUpload fires.
 func MarkUploadInFlight(filePath string) {
+	filePath = normalizeUploadPath(filePath)
 	pendingUploadsMu.Lock()
 	pendingUploads[filePath] = struct{}{}
 	pendingUploadsMu.Unlock()
@@ -20,6 +24,7 @@ func MarkUploadInFlight(filePath string) {
 // MarkUploadDone removes a file from the in-flight set.  Called via defer in
 // upload goroutines so the set is always cleaned up.
 func MarkUploadDone(filePath string) {
+	filePath = normalizeUploadPath(filePath)
 	pendingUploadsMu.Lock()
 	delete(pendingUploads, filePath)
 	pendingUploadsMu.Unlock()
@@ -27,8 +32,16 @@ func MarkUploadDone(filePath string) {
 
 // IsUploadInFlight returns true if the file is currently being uploaded.
 func IsUploadInFlight(filePath string) bool {
+	filePath = normalizeUploadPath(filePath)
 	pendingUploadsMu.Lock()
 	_, ok := pendingUploads[filePath]
 	pendingUploadsMu.Unlock()
 	return ok
+}
+
+func normalizeUploadPath(filePath string) string {
+	if abs, err := filepath.Abs(filePath); err == nil {
+		return filepath.Clean(abs)
+	}
+	return filepath.Clean(filePath)
 }

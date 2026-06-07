@@ -2,6 +2,7 @@ package config
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -178,41 +179,41 @@ func New(c *cli.Context) (*entity.Config, error) {
 	compress := c.Bool("compress")
 
 	cfg := &entity.Config{
-		Version:                c.App.Version,
-		Username:               c.String("username"),
-		AdminUsername:          c.String("admin-username"),
-		AdminPassword:          c.String("admin-password"),
-		Framerate:              c.Int("framerate"),
-		Resolution:             c.Int("resolution"),
-		Pattern:                c.String("pattern"),
-		MaxDuration:            c.Int("max-duration"),
-		MaxFilesize:            c.Int("max-filesize"),
-		Compress:               compress,
-		Port:                   c.String("port"),
-		Interval:               c.Int("interval"),
-		Cookies:                c.String("cookies"),
-		UserAgent:              c.String("user-agent"),
-		Domain:                 c.String("domain"),
-		ProxyURL:               c.String("proxy-url"),
-		ProxyUsername:          c.String("proxy-username"),
-		ProxyPassword:          c.String("proxy-password"),
-		OutputDir:              c.String("output-dir"),
-		PerModelFolder:         c.Bool("per-model-folder"),
-		DeleteLocalAfterUpload: c.Bool("delete-local-after-upload"),
-		OrphanCleanupInterval:  c.Int("orphan-cleanup-interval"),
-		DiskWarningPercent:     c.Int("disk-warning-percent"),
-		DiskCriticalPercent:    c.Int("disk-critical-percent"),
-		MaxLocalAgeDays:        c.Int("max-local-age-days"),
+		Version:                 c.App.Version,
+		Username:                c.String("username"),
+		AdminUsername:           c.String("admin-username"),
+		AdminPassword:           c.String("admin-password"),
+		Framerate:               c.Int("framerate"),
+		Resolution:              c.Int("resolution"),
+		Pattern:                 c.String("pattern"),
+		MaxDuration:             c.Int("max-duration"),
+		MaxFilesize:             c.Int("max-filesize"),
+		Compress:                compress,
+		Port:                    c.String("port"),
+		Interval:                c.Int("interval"),
+		Cookies:                 c.String("cookies"),
+		UserAgent:               c.String("user-agent"),
+		Domain:                  c.String("domain"),
+		ProxyURL:                c.String("proxy-url"),
+		ProxyUsername:           c.String("proxy-username"),
+		ProxyPassword:           c.String("proxy-password"),
+		OutputDir:               c.String("output-dir"),
+		PerModelFolder:          c.Bool("per-model-folder"),
+		DeleteLocalAfterUpload:  c.Bool("delete-local-after-upload"),
+		OrphanCleanupInterval:   c.Int("orphan-cleanup-interval"),
+		DiskWarningPercent:      c.Int("disk-warning-percent"),
+		DiskCriticalPercent:     c.Int("disk-critical-percent"),
+		MaxLocalAgeDays:         c.Int("max-local-age-days"),
 		MinDurationBeforeUpload: c.Int("min-duration-before-upload"),
-		VoeSXAPIKey:            c.String("voesx-api-key"),
-		StreamtapeLogin:        c.String("streamtape-login"),
-		StreamtapeKey:          c.String("streamtape-key"),
-		MixdropEmail:           c.String("mixdrop-email"),
-		MixdropToken:           c.String("mixdrop-token"),
-		PixelDrainToken:        c.String("pixeldrain-token"),
-		SupabaseURL:            c.String("supabase-url"),
-		SupabaseAPIKey:         c.String("supabase-api-key"),
-		StripchatPDKey:         c.String("stripchat-pdkey"),
+		VoeSXAPIKey:             c.String("voesx-api-key"),
+		StreamtapeLogin:         c.String("streamtape-login"),
+		StreamtapeKey:           c.String("streamtape-key"),
+		MixdropEmail:            c.String("mixdrop-email"),
+		MixdropToken:            c.String("mixdrop-token"),
+		PixelDrainToken:         c.String("pixeldrain-token"),
+		SupabaseURL:             c.String("supabase-url"),
+		SupabaseAPIKey:          c.String("supabase-api-key"),
+		StripchatPDKey:          c.String("stripchat-pdkey"),
 	}
 
 	// If user provided a custom ffmpeg path, set it globally
@@ -221,8 +222,18 @@ func New(c *cli.Context) (*entity.Config, error) {
 		SetFFmpegPath(path)
 	}
 
-	cfg.SessionDuration = "5h20m0s"
-	cfg.SessionDurationParsed = 5*time.Hour + 20*time.Minute
+	sessionDuration := c.String("session-duration")
+	if sessionDuration == "" {
+		sessionDuration = "5h20m0s"
+	}
+	if sessionDuration != "0" {
+		parsed, err := time.ParseDuration(sessionDuration)
+		if err != nil {
+			return nil, fmt.Errorf("parse session-duration %q: %w", sessionDuration, err)
+		}
+		cfg.SessionDuration = sessionDuration
+		cfg.SessionDurationParsed = parsed
+	}
 
 	return cfg, nil
 }

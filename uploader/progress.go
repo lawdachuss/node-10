@@ -39,28 +39,43 @@ func reportProgress(host string, current, total int64) {
 
 // ProgressReader wraps an io.Reader and reports read progress via a callback.
 type ProgressReader struct {
-	reader  io.Reader
-	total   int64
-	read    int64
-	host    string
-	called  bool // whether we've already sent the initial (0, total) report
+	reader io.Reader
+	total  int64
+	read   int64
+	host   string
+	fn     ProgressFunc
+	called bool // whether we've already sent the initial (0, total) report
 }
 
 // NewProgressReader creates a ProgressReader that reports progress to the
-// global callback. The host parameter identifies which upload host is reading.
+// global callback. Prefer NewProgressReaderWithCallback for per-upload progress.
 func NewProgressReader(r io.Reader, total int64, host string) *ProgressReader {
-	return &ProgressReader{reader: r, total: total, host: host}
+	return NewProgressReaderWithCallback(r, total, host, nil)
+}
+
+// NewProgressReaderWithCallback creates a ProgressReader with an upload-local
+// callback. If fn is nil, it falls back to the legacy package callback.
+func NewProgressReaderWithCallback(r io.Reader, total int64, host string, fn ProgressFunc) *ProgressReader {
+	return &ProgressReader{reader: r, total: total, host: host, fn: fn}
+}
+
+func (pr *ProgressReader) report(current, total int64) {
+	if pr.fn != nil {
+		pr.fn(pr.host, current, total)
+		return
+	}
+	reportProgress(pr.host, current, total)
 }
 
 func (pr *ProgressReader) Read(p []byte) (int, error) {
 	if !pr.called {
 		pr.called = true
-		reportProgress(pr.host, 0, pr.total)
+		pr.report(0, pr.total)
 	}
 	n, err := pr.reader.Read(p)
 	pr.read += int64(n)
 	if n > 0 {
-		reportProgress(pr.host, pr.read, pr.total)
+		pr.report(pr.read, pr.total)
 	}
 	return n, err
 }

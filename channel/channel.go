@@ -47,45 +47,45 @@ type Channel struct {
 
 	stateMu sync.Mutex // protects IsOnline, IsConnecting, RoomStatus, Duration, Filesize
 
-	RoomTitle     string   // captured from API at recording start
-	Tags          []string // captured from API at recording start
-	Viewers       int      // captured from API at recording start
-	Gender        string   // broadcaster_gender from Chaturbate API ("m", "f", "c", "t", …)
-	Resolution    string   // actual stream resolution (e.g. "1920x1080")
-	Framerate     int      // actual stream framerate (e.g. 30)
-	LiveThumbURL  string   // live thumbnail URL for the current stream
+	RoomTitle    string   // captured from API at recording start
+	Tags         []string // captured from API at recording start
+	Viewers      int      // captured from API at recording start
+	Gender       string   // broadcaster_gender from Chaturbate API ("m", "f", "c", "t", …)
+	Resolution   string   // actual stream resolution (e.g. "1920x1080")
+	Framerate    int      // actual stream framerate (e.g. 30)
+	LiveThumbURL string   // live thumbnail URL for the current stream
 
 	Logs   []string
 	logsMu sync.Mutex
 
-	File             *os.File
-	AudioFile        *os.File
-	Config           *entity.ChannelConfig
-	CurrentFilename  string
+	File              *os.File
+	AudioFile         *os.File
+	Config            *entity.ChannelConfig
+	CurrentFilename   string
 	InitSegment       []byte // fMP4 video init segment for LL-HLS streams
 	AudioInitSegment  []byte // fMP4 audio init segment for LL-HLS streams
 	HasSeparateAudio  bool
-	switchRequested   bool // set by HandleSegment, consumed by OnPollComplete
-	videoSegmentCount int  // tracks video segments written to current file
-	audioSegmentCount int  // tracks audio segments written to current file
-	cleanupMu        sync.Mutex // serialises Cleanup() calls from concurrent goroutines
-	pendingFiles     []pendingFile
-	UploadWg         sync.WaitGroup // tracks in-flight upload goroutines for graceful shutdown
-	monitorWg        sync.WaitGroup // tracks the Monitor goroutine lifetime
-	uploadSem        chan struct{}  // per-channel upload semaphore (1 at a time)
-	PipelineQueue    *PipelineQueue // ordered pipeline for thumbnails → upload → metadata → cleanup
+	switchRequested   bool       // set by HandleSegment, consumed by OnPollComplete
+	videoSegmentCount int        // tracks video segments written to current file
+	audioSegmentCount int        // tracks audio segments written to current file
+	cleanupMu         sync.Mutex // serialises Cleanup() calls from concurrent goroutines
+	pendingFiles      []pendingFile
+	UploadWg          sync.WaitGroup // tracks in-flight upload goroutines for graceful shutdown
+	monitorWg         sync.WaitGroup // tracks the Monitor goroutine lifetime
+	uploadSem         chan struct{}  // per-channel upload semaphore (1 at a time)
+	PipelineQueue     *PipelineQueue // ordered pipeline for thumbnails → upload → metadata → cleanup
 
 	// Upload progress tracking — updated by the pipeline worker goroutine.
 	// Thread-safe via uploadStatusMu; visible in the UI via ExportInfo().
 	uploadStatusMu   sync.Mutex
-	UploadStatus     string            // human-readable status: "", "generating thumbnails…", "uploading (2/5 hosts)…"
-	UploadProgress   float64           // 0–100, best-effort estimate
-	UploadFilename   string            // file currently being processed by the pipeline
-	UploadHostCount  int               // how many hosts have completed
-	UploadHostTotal  int               // total hosts to upload to
-	UploadBytesCur   int64             // bytes uploaded so far
-	UploadBytesTotal int64             // total file size
-	UploadSpeed      string            // formatted aggregate speed
+	UploadStatus     string             // human-readable status: "", "generating thumbnails…", "uploading (2/5 hosts)…"
+	UploadProgress   float64            // 0–100, best-effort estimate
+	UploadFilename   string             // file currently being processed by the pipeline
+	UploadHostCount  int                // how many hosts have completed
+	UploadHostTotal  int                // total hosts to upload to
+	UploadBytesCur   int64              // bytes uploaded so far
+	UploadBytesTotal int64              // total file size
+	UploadSpeed      string             // formatted aggregate speed
 	UploadHosts      []entity.HostEntry // per-host progress
 }
 
@@ -297,22 +297,22 @@ func (ch *Channel) exportInfo(includeLogs bool) *entity.ChannelInfo {
 	}
 
 	return &entity.ChannelInfo{
-		IsOnline:      isOnline,
-		IsConnecting:  isConnecting,
-		IsPaused:      ch.Config.IsPaused.Load(),
-		IsCompressing: atomic.LoadInt32(&ch.CompressingCount) > 0,
-		RoomStatus:    roomStatus,
-		Username:      ch.Config.Username,
-		Site:          siteName,
-		SiteDomain:    siteDomain,
-		LiveThumbURL:  liveThumbURL,
-		MaxDuration:   internal.FormatDuration(float64(ch.Config.MaxDuration * 60)),
-		MaxFilesize:   internal.FormatFilesize(ch.Config.MaxFilesize * 1024 * 1024),
-		StreamedAt:    streamedAt,
-		CreatedAt:     ch.Config.CreatedAt,
-		Duration:      internal.FormatDuration(duration),
-		Filesize:      internal.FormatFilesize(filesize),
-		Filename:      filename,
+		IsOnline:       isOnline,
+		IsConnecting:   isConnecting,
+		IsPaused:       ch.Config.IsPaused.Load(),
+		IsCompressing:  atomic.LoadInt32(&ch.CompressingCount) > 0,
+		RoomStatus:     roomStatus,
+		Username:       ch.Config.Username,
+		Site:           siteName,
+		SiteDomain:     siteDomain,
+		LiveThumbURL:   liveThumbURL,
+		MaxDuration:    internal.FormatDuration(float64(ch.Config.MaxDuration * 60)),
+		MaxFilesize:    internal.FormatFilesize(ch.Config.MaxFilesize * 1024 * 1024),
+		StreamedAt:     streamedAt,
+		CreatedAt:      ch.Config.CreatedAt,
+		Duration:       internal.FormatDuration(duration),
+		Filesize:       internal.FormatFilesize(filesize),
+		Filename:       filename,
 		Logs:           logsCopy,
 		GlobalConfig:   server.Config,
 		UploadStatus:   uploadStatus,
@@ -361,9 +361,17 @@ func (ch *Channel) Stop() {
 	ch.CancelFunc()
 	ch.PauseCancelFunc()
 	ch.cancelMu.Unlock()
-	ch.closeDone.Do(func() { close(ch.done) })
-	ch.PipelineQueue.Stop()
+	ch.WaitMonitor()
+	ch.ProcessPending()
 	ch.Info("channel stopped")
+	ch.Close()
+}
+
+// Close stops non-recording background goroutines after recording/upload work
+// has been processed.
+func (ch *Channel) Close() {
+	ch.PipelineQueue.Stop()
+	ch.closeDone.Do(func() { close(ch.done) })
 }
 
 // Resume resumes channel monitoring immediately. API pacing is handled by the

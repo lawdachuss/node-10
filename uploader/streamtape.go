@@ -62,6 +62,11 @@ type streamtapeUploadResp struct {
 
 // Upload uploads a file to Streamtape and returns the embed/view link
 func (u *StreamtapeUploader) Upload(filePath string) (string, error) {
+	return u.UploadWithProgress(filePath, nil)
+}
+
+// UploadWithProgress uploads a file to Streamtape and reports progress through fn.
+func (u *StreamtapeUploader) UploadWithProgress(filePath string, progress ProgressFunc) (string, error) {
 	streamtapeSem <- struct{}{}
 	defer func() { <-streamtapeSem }()
 
@@ -70,7 +75,7 @@ func (u *StreamtapeUploader) Upload(filePath string) (string, error) {
 		return "", fmt.Errorf("get upload URL: %w", err)
 	}
 
-	link, err := u.uploadFile(filePath, uploadURL)
+	link, err := u.uploadFile(filePath, uploadURL, progress)
 	if err != nil {
 		return "", fmt.Errorf("upload file: %w", err)
 	}
@@ -109,9 +114,9 @@ func (u *StreamtapeUploader) getUploadURL() (string, error) {
 	return serverResp.Result.URL, nil
 }
 
-func (u *StreamtapeUploader) uploadFile(filePath, uploadURL string) (string, error) {
+func (u *StreamtapeUploader) uploadFile(filePath, uploadURL string, progress ProgressFunc) (string, error) {
 	// Build multipart body with exact Content-Length — Streamtape rejects chunked encoding.
-	body, contentLen, contentType, closer, err := multipartStream(nil, "file", filePath, "Streamtape")
+	body, contentLen, contentType, closer, err := multipartStreamWithProgress(nil, "file", filePath, "Streamtape", progress)
 	if err != nil {
 		return "", fmt.Errorf("build multipart: %w", err)
 	}

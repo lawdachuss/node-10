@@ -93,13 +93,13 @@ type Manager struct {
 
 	// sessionStopCh is created each sessionLoop iteration; TriggerSessionStop
 	// sends on it to break out of the timer early and start processing.
-	sessionStopCh   chan struct{}
-	sessionStopMu   sync.Mutex
+	sessionStopCh chan struct{}
+	sessionStopMu sync.Mutex
 
 	// sessionMu prevents multiple concurrent sessionLoop goroutines when
 	// StartSession is called more than once (e.g. from create-channel handler).
-	sessionMu       sync.Mutex
-	sessionStarted  bool
+	sessionMu      sync.Mutex
+	sessionStarted bool
 }
 
 // TriggerSessionStop signals the session loop to stop recording now and
@@ -212,6 +212,7 @@ func (m *Manager) LoadConfig() error {
 		conf.Sanitize()
 		ch := channel.New(conf)
 		m.Channels.Store(conf.Username, ch)
+		ch.PipelineQueue.ResumePending()
 
 		// Automatically resume all channels on startup
 		if ch.Config.IsPaused.Load() {
@@ -319,6 +320,7 @@ func (m *Manager) CreateChannel(conf *entity.ChannelConfig, shouldSave bool) err
 		return fmt.Errorf("channel %s already exists", conf.Username)
 	}
 	m.Channels.Store(conf.Username, ch)
+	ch.PipelineQueue.ResumePending()
 
 	ch.Resume(0)
 
@@ -366,8 +368,6 @@ func (m *Manager) StopChannel(username string) error {
 	go func() {
 		ch := thing.(*channel.Channel)
 		ch.Stop()
-		ch.WaitMonitor()  // wait for Monitor to exit + Cleanup(CloseQueue) to queue files
-		ch.ProcessPending() // mux/compress/upload queued files
 	}()
 
 	return nil
@@ -386,14 +386,31 @@ func (m *Manager) StopWatcher() {
 	}
 }
 
-// WaitForUploads blocks until all in-flight upload goroutines across every
-// channel have finished. Call this during graceful shutdown so recordings
-// are not lost when the container receives SIGTERM.
+// WaitForUploads processes queued recordings and blocks until their uploads
+// and metadata saves have finished. Call this during graceful shutdown so
+// recordings are not lost when the container receives SIGTERM.
 func (m *Manager) WaitForUploads() {
+	var chs []*channel.Channel
 	m.Channels.Range(func(key, value any) bool {
-		value.(*channel.Channel).UploadWg.Wait()
+		chs = append(chs, value.(*channel.Channel))
 		return true
 	})
+	if len(chs) == 0 {
+		return
+	}
+
+	sem := make(chan struct{}, 2)
+	var wg sync.WaitGroup
+	for _, ch := range chs {
+		sem <- struct{}{}
+		wg.Add(1)
+		go func(ch *channel.Channel) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			ch.ProcessPending()
+		}(ch)
+	}
+	wg.Wait()
 }
 
 // StopAllChannels cancels all active channel Monitor goroutines without
@@ -401,7 +418,7 @@ func (m *Manager) WaitForUploads() {
 // can be finalized and uploaded before the process exits.
 func (m *Manager) StopAllChannels() {
 	m.Channels.Range(func(key, value any) bool {
-		value.(*channel.Channel).Stop()
+		value.(*channel.Channel).Cancel()
 		return true
 	})
 }
@@ -528,17 +545,7 @@ func (m *Manager) StopWithProcessingQueue(workers int) {
 		}(ch)
 	}
 
-	// Wait for all workers with a global timeout (same as pre-queue behaviour).
-	waitCh := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(waitCh)
-	}()
-	select {
-	case <-waitCh:
-	case <-time.After(10 * time.Minute):
-		log.Println("[session] WARN: queue processing timed out after 10 minutes — proceeding anyway")
-	}
+	wg.Wait()
 }
 
 // StartSession begins the automatic recording-session lifecycle.

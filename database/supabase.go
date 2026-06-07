@@ -66,18 +66,25 @@ func (c *Client) requestWithRetry(method, path string, body interface{}) (*http.
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		resp, err := c.request(method, path, body)
 		if err != nil {
+			lastErr = err
+			if attempt < maxRetries-1 {
+				backoff := retryBackoff(attempt)
+				fmt.Printf("[WARN] Supabase request failed (attempt %d/%d), retrying in %v: %v\n", attempt+1, maxRetries, backoff, err)
+				time.Sleep(backoff)
+				continue
+			}
 			return nil, err
 		}
 
 		// Check for transient errors that need retry
-		if resp.StatusCode == 503 || resp.StatusCode == 400 {
+		if resp.StatusCode == 408 || resp.StatusCode == 429 || resp.StatusCode >= 500 || resp.StatusCode == 400 {
 			bodyBytes, _ := io.ReadAll(resp.Body)
 			bodyStr := string(bodyBytes)
 
 			// PGRST002: schema cache rebuilding after migration
 			if resp.StatusCode == 503 && strings.Contains(bodyStr, "PGRST002") {
 				lastErr = fmt.Errorf("HTTP 503: %s", bodyStr)
-				backoff := time.Duration(2<<attempt) * time.Second
+				backoff := retryBackoff(attempt)
 				fmt.Printf("[WARN] Supabase schema cache rebuilding (attempt %d/%d), retrying in %v\n", attempt+1, maxRetries, backoff)
 				resp.Body.Close()
 				time.Sleep(backoff)
@@ -87,7 +94,7 @@ func (c *Client) requestWithRetry(method, path string, body interface{}) (*http.
 			// PGRST204: column not yet in PostgREST schema cache
 			if resp.StatusCode == 400 && strings.Contains(bodyStr, "PGRST204") {
 				lastErr = fmt.Errorf("HTTP 400: %s", bodyStr)
-				backoff := time.Duration(2<<attempt) * time.Second
+				backoff := retryBackoff(attempt)
 				fmt.Printf("[WARN] Supabase schema cache stale — column missing (attempt %d/%d), retrying in %v\n", attempt+1, maxRetries, backoff)
 				resp.Body.Close()
 				time.Sleep(backoff)
@@ -95,6 +102,18 @@ func (c *Client) requestWithRetry(method, path string, body interface{}) (*http.
 			}
 
 			// Non-retryable error — return as-is
+			if resp.StatusCode == 408 || resp.StatusCode == 429 || resp.StatusCode >= 500 {
+				lastErr = fmt.Errorf("HTTP %d: %s", resp.StatusCode, bodyStr)
+				resp.Body.Close()
+				if attempt < maxRetries-1 {
+					backoff := retryBackoff(attempt)
+					fmt.Printf("[WARN] Supabase transient HTTP %d (attempt %d/%d), retrying in %v\n", resp.StatusCode, attempt+1, maxRetries, backoff)
+					time.Sleep(backoff)
+					continue
+				}
+				return nil, lastErr
+			}
+
 			resp.Body.Close()
 			return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, bodyStr)
 		}
@@ -103,6 +122,16 @@ func (c *Client) requestWithRetry(method, path string, body interface{}) (*http.
 	}
 
 	return nil, fmt.Errorf("max retries exceeded: %w", lastErr)
+}
+
+func retryBackoff(attempt int) time.Duration {
+	if attempt < 0 {
+		attempt = 0
+	}
+	if attempt > 5 {
+		attempt = 5
+	}
+	return time.Duration(1<<attempt) * 2 * time.Second
 }
 
 func (c *Client) get(path string, result interface{}) error {
@@ -171,17 +200,17 @@ func (c *Client) delete(path string) error {
 // ============================================================================
 
 type Channel struct {
-        ID          string `json:"id,omitempty"`
-        Username    string `json:"username"`
-        IsPaused    bool   `json:"is_paused"`
-        Framerate   int    `json:"framerate"`
-        Resolution  int    `json:"resolution"`
-        Pattern     string `json:"pattern"`
-        MaxDuration int    `json:"max_duration"`
-        MaxFilesize int    `json:"max_filesize"`
-        Compress    bool   `json:"compress"`
-        CreatedAt   int64  `json:"created_at"`
-        UpdatedAt   string `json:"updated_at,omitempty"`
+	ID          string `json:"id,omitempty"`
+	Username    string `json:"username"`
+	IsPaused    bool   `json:"is_paused"`
+	Framerate   int    `json:"framerate"`
+	Resolution  int    `json:"resolution"`
+	Pattern     string `json:"pattern"`
+	MaxDuration int    `json:"max_duration"`
+	MaxFilesize int    `json:"max_filesize"`
+	Compress    bool   `json:"compress"`
+	CreatedAt   int64  `json:"created_at"`
+	UpdatedAt   string `json:"updated_at,omitempty"`
 }
 
 // SaveChannel creates or updates a channel using Supabase's upsert functionality.
@@ -202,48 +231,48 @@ func (c *Client) SaveChannel(ch *Channel) error {
 
 // GetChannel retrieves a channel by username
 func (c *Client) GetChannel(username string) (*Channel, error) {
-        var channels []Channel
-        err := c.get(fmt.Sprintf("/channels?username=eq.%s&limit=1", url.QueryEscape(username)), &channels)
-        if err != nil {
-                return nil, err
-        }
-        if len(channels) == 0 {
-                return nil, fmt.Errorf("channel not found")
-        }
-        return &channels[0], nil
+	var channels []Channel
+	err := c.get(fmt.Sprintf("/channels?username=eq.%s&limit=1", url.QueryEscape(username)), &channels)
+	if err != nil {
+		return nil, err
+	}
+	if len(channels) == 0 {
+		return nil, fmt.Errorf("channel not found")
+	}
+	return &channels[0], nil
 }
 
 // GetAllChannels retrieves all channels
 func (c *Client) GetAllChannels() ([]Channel, error) {
-        var channels []Channel
-        err := c.get("/channels?order=created_at.desc&limit=50000", &channels)
-        return channels, err
+	var channels []Channel
+	err := c.get("/channels?order=created_at.desc&limit=50000", &channels)
+	return channels, err
 }
 
 // DeleteChannel removes a channel
 func (c *Client) DeleteChannel(username string) error {
-        return c.delete(fmt.Sprintf("/channels?username=eq.%s", url.QueryEscape(username)))
+	return c.delete(fmt.Sprintf("/channels?username=eq.%s", url.QueryEscape(username)))
 }
 
 // DeleteChannelsNotIn removes all channel rows whose username is NOT in the
 // provided list. Pass an empty slice to delete all channels.
 func (c *Client) DeleteChannelsNotIn(usernames []string) error {
-        if len(usernames) == 0 {
-                return c.delete("/channels")
-        }
-        // Build a PostgREST "not.in.(a,b,c)" filter
-        escaped := make([]string, len(usernames))
-        for i, u := range usernames {
-                escaped[i] = url.QueryEscape(u)
-        }
-        list := ""
-        for i, u := range usernames {
-                if i > 0 {
-                        list += ","
-                }
-                list += u
-        }
-        return c.delete(fmt.Sprintf("/channels?username=not.in.(%s)", url.QueryEscape("("+list+")")))
+	if len(usernames) == 0 {
+		return c.delete("/channels")
+	}
+	// Build a PostgREST "not.in.(a,b,c)" filter
+	escaped := make([]string, len(usernames))
+	for i, u := range usernames {
+		escaped[i] = url.QueryEscape(u)
+	}
+	list := ""
+	for i, u := range usernames {
+		if i > 0 {
+			list += ","
+		}
+		list += u
+	}
+	return c.delete(fmt.Sprintf("/channels?username=not.in.(%s)", url.QueryEscape("("+list+")")))
 }
 
 // ============================================================================
@@ -291,44 +320,44 @@ func (c *Client) SaveRecording(rec *Recording) error {
 
 // GetRecording retrieves a recording by filename
 func (c *Client) GetRecording(filename string) (*Recording, error) {
-        var recordings []Recording
-        err := c.get(fmt.Sprintf("/recordings?filename=eq.%s&limit=1", url.QueryEscape(filename)), &recordings)
-        if err != nil {
-                return nil, err
-        }
-        if len(recordings) == 0 {
-                return nil, fmt.Errorf("recording not found")
-        }
-        return &recordings[0], nil
+	var recordings []Recording
+	err := c.get(fmt.Sprintf("/recordings?filename=eq.%s&limit=1", url.QueryEscape(filename)), &recordings)
+	if err != nil {
+		return nil, err
+	}
+	if len(recordings) == 0 {
+		return nil, fmt.Errorf("recording not found")
+	}
+	return &recordings[0], nil
 }
 
 // GetRecordingsByUsername retrieves all recordings for a username
 func (c *Client) GetRecordingsByUsername(username string) ([]Recording, error) {
-        var recordings []Recording
-        err := c.get(fmt.Sprintf("/recordings?username=eq.%s&order=timestamp.desc", url.QueryEscape(username)), &recordings)
-        return recordings, err
+	var recordings []Recording
+	err := c.get(fmt.Sprintf("/recordings?username=eq.%s&order=timestamp.desc", url.QueryEscape(username)), &recordings)
+	return recordings, err
 }
 
 // GetAllRecordings retrieves all recordings
 func (c *Client) GetAllRecordings() ([]Recording, error) {
-        var recordings []Recording
-        err := c.get("/recordings?order=timestamp.desc&limit=50000", &recordings)
-        return recordings, err
+	var recordings []Recording
+	err := c.get("/recordings?order=timestamp.desc&limit=50000", &recordings)
+	return recordings, err
 }
 
 // DeleteRecording removes a recording
 func (c *Client) DeleteRecording(filename string) error {
-        return c.delete(fmt.Sprintf("/recordings?filename=eq.%s", url.QueryEscape(filename)))
+	return c.delete(fmt.Sprintf("/recordings?filename=eq.%s", url.QueryEscape(filename)))
 }
 
 // DeletePreviewImage removes a preview image by filename
 func (c *Client) DeletePreviewImage(filename string) error {
-        return c.delete(fmt.Sprintf("/preview_images?filename=eq.%s", url.QueryEscape(filename)))
+	return c.delete(fmt.Sprintf("/preview_images?filename=eq.%s", url.QueryEscape(filename)))
 }
 
 // DeleteUploadLinksByRecordingID removes all upload links for a recording
 func (c *Client) DeleteUploadLinksByRecordingID(recordingID string) error {
-        return c.delete(fmt.Sprintf("/upload_links?recording_id=eq.%s", url.QueryEscape(recordingID)))
+	return c.delete(fmt.Sprintf("/upload_links?recording_id=eq.%s", url.QueryEscape(recordingID)))
 }
 
 // ============================================================================
@@ -336,44 +365,44 @@ func (c *Client) DeleteUploadLinksByRecordingID(recordingID string) error {
 // ============================================================================
 
 type UploadLink struct {
-        ID          string `json:"id,omitempty"`
-        RecordingID string `json:"recording_id"`
-        Host        string `json:"host"`
-        URL         string `json:"url"`
-        UploadedAt  string `json:"uploaded_at,omitempty"`
+	ID          string `json:"id,omitempty"`
+	RecordingID string `json:"recording_id"`
+	Host        string `json:"host"`
+	URL         string `json:"url"`
+	UploadedAt  string `json:"uploaded_at,omitempty"`
 }
 
 // SaveUploadLink creates or updates an upload link.
 // Uses on_conflict to atomically upsert by (recording_id, host), making
 // repeated calls idempotent and preventing duplicate rows.
 func (c *Client) SaveUploadLink(link *UploadLink) error {
-        resp, err := c.requestWithRetry("POST", "/upload_links?on_conflict=recording_id,host", link)
-        if err != nil {
-                return err
-        }
-        defer resp.Body.Close()
+	resp, err := c.requestWithRetry("POST", "/upload_links?on_conflict=recording_id,host", link)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
 
-        if resp.StatusCode >= 400 {
-                bodyBytes, _ := io.ReadAll(resp.Body)
-                return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(bodyBytes))
-        }
-        return nil
+	if resp.StatusCode >= 400 {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+	return nil
 }
 
 // SaveUploadLinks batch-saves all upload links in a single request.
 // Uses on_conflict to upsert by (recording_id, host).
 func (c *Client) SaveUploadLinks(links []UploadLink) error {
-        resp, err := c.requestWithRetry("POST", "/upload_links?on_conflict=recording_id,host", links)
-        if err != nil {
-                return err
-        }
-        defer resp.Body.Close()
+	resp, err := c.requestWithRetry("POST", "/upload_links?on_conflict=recording_id,host", links)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
 
-        if resp.StatusCode >= 400 {
-                bodyBytes, _ := io.ReadAll(resp.Body)
-                return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(bodyBytes))
-        }
-        return nil
+	if resp.StatusCode >= 400 {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+	return nil
 }
 
 // GetUploadLinks retrieves all upload links for a recording
@@ -396,49 +425,49 @@ func (c *Client) GetAllUploadLinks() ([]UploadLink, error) {
 // ============================================================================
 
 type AppSetting struct {
-        Key       string          `json:"key"`
-        Value     json.RawMessage `json:"value"`
-        UpdatedAt string          `json:"updated_at,omitempty"`
+	Key       string          `json:"key"`
+	Value     json.RawMessage `json:"value"`
+	UpdatedAt string          `json:"updated_at,omitempty"`
 }
 
 // SaveSetting creates or updates an app setting
 func (c *Client) SaveSetting(key string, value interface{}) error {
-        jsonValue, err := json.Marshal(value)
-        if err != nil {
-                return fmt.Errorf("marshal value: %w", err)
-        }
+	jsonValue, err := json.Marshal(value)
+	if err != nil {
+		return fmt.Errorf("marshal value: %w", err)
+	}
 
-        setting := &AppSetting{
-                Key:   key,
-                Value: jsonValue,
-        }
+	setting := &AppSetting{
+		Key:   key,
+		Value: jsonValue,
+	}
 
 	// Upsert using Prefer header
 	resp, err := c.requestWithRetry("POST", "/app_settings", setting)
-        if err != nil {
-                return err
-        }
-        defer resp.Body.Close()
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
 
-        if resp.StatusCode >= 400 {
-                body, _ := io.ReadAll(resp.Body)
-                return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
-        }
-        return nil
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+	}
+	return nil
 }
 
 // GetSetting retrieves an app setting
 func (c *Client) GetSetting(key string, result interface{}) error {
-        var settings []AppSetting
-        err := c.get(fmt.Sprintf("/app_settings?key=eq.%s&limit=1", url.QueryEscape(key)), &settings)
-        if err != nil {
-                return err
-        }
-        if len(settings) == 0 {
-                return fmt.Errorf("setting not found")
-        }
+	var settings []AppSetting
+	err := c.get(fmt.Sprintf("/app_settings?key=eq.%s&limit=1", url.QueryEscape(key)), &settings)
+	if err != nil {
+		return err
+	}
+	if len(settings) == 0 {
+		return fmt.Errorf("setting not found")
+	}
 
-        return json.Unmarshal(settings[0].Value, result)
+	return json.Unmarshal(settings[0].Value, result)
 }
 
 // ============================================================================
@@ -486,25 +515,25 @@ func (c *Client) DeactivateOldTunnels(instanceID string) error {
 // ============================================================================
 
 type ChannelLog struct {
-        ID        string `json:"id,omitempty"`
-        ChannelID string `json:"channel_id,omitempty"`
-        Username  string `json:"username"`
-        LogLevel  string `json:"log_level"`
-        Message   string `json:"message"`
-        CreatedAt string `json:"created_at,omitempty"`
+	ID        string `json:"id,omitempty"`
+	ChannelID string `json:"channel_id,omitempty"`
+	Username  string `json:"username"`
+	LogLevel  string `json:"log_level"`
+	Message   string `json:"message"`
+	CreatedAt string `json:"created_at,omitempty"`
 }
 
 // SaveLog creates a new log entry
 func (c *Client) SaveLog(log *ChannelLog) error {
-        var result []ChannelLog
-        return c.post("/channel_logs", log, &result)
+	var result []ChannelLog
+	return c.post("/channel_logs", log, &result)
 }
 
 // GetLogs retrieves logs for a channel
 func (c *Client) GetLogs(username string, limit int) ([]ChannelLog, error) {
-        var logs []ChannelLog
-        err := c.get(fmt.Sprintf("/channel_logs?username=eq.%s&order=created_at.desc&limit=%d", url.QueryEscape(username), limit), &logs)
-        return logs, err
+	var logs []ChannelLog
+	err := c.get(fmt.Sprintf("/channel_logs?username=eq.%s&order=created_at.desc&limit=%d", url.QueryEscape(username), limit), &logs)
+	return logs, err
 }
 
 // ============================================================================
@@ -540,22 +569,22 @@ func (c *Client) SavePreviewImage(img *PreviewImage) error {
 
 // GetPreviewImage retrieves preview image metadata
 func (c *Client) GetPreviewImage(filename string) (*PreviewImage, error) {
-        var images []PreviewImage
-        err := c.get(fmt.Sprintf("/preview_images?filename=eq.%s&limit=1", url.QueryEscape(filename)), &images)
-        if err != nil {
-                return nil, err
-        }
-        if len(images) == 0 {
-                return nil, fmt.Errorf("preview image not found")
-        }
-        return &images[0], nil
+	var images []PreviewImage
+	err := c.get(fmt.Sprintf("/preview_images?filename=eq.%s&limit=1", url.QueryEscape(filename)), &images)
+	if err != nil {
+		return nil, err
+	}
+	if len(images) == 0 {
+		return nil, fmt.Errorf("preview image not found")
+	}
+	return &images[0], nil
 }
 
 // GetAllPreviewImages returns all preview images from the database.
 func (c *Client) GetAllPreviewImages() ([]PreviewImage, error) {
-        var images []PreviewImage
-        err := c.get("/preview_images?limit=50000", &images)
-        return images, err
+	var images []PreviewImage
+	err := c.get("/preview_images?limit=50000", &images)
+	return images, err
 }
 
 // ============================================================================
@@ -563,31 +592,31 @@ func (c *Client) GetAllPreviewImages() ([]PreviewImage, error) {
 // ============================================================================
 
 type DiskUsage struct {
-        ID           string `json:"id,omitempty"`
-        TotalBytes   int64  `json:"total_bytes"`
-        UsedBytes    int64  `json:"used_bytes"`
-        FreeBytes    int64  `json:"free_bytes"`
-        PercentUsed  int    `json:"percent_used"`
-        RecordedAt   string `json:"recorded_at,omitempty"`
+	ID          string `json:"id,omitempty"`
+	TotalBytes  int64  `json:"total_bytes"`
+	UsedBytes   int64  `json:"used_bytes"`
+	FreeBytes   int64  `json:"free_bytes"`
+	PercentUsed int    `json:"percent_used"`
+	RecordedAt  string `json:"recorded_at,omitempty"`
 }
 
 // SaveDiskUsage records current disk usage
 func (c *Client) SaveDiskUsage(usage *DiskUsage) error {
-        var result []DiskUsage
-        return c.post("/disk_usage", usage, &result)
+	var result []DiskUsage
+	return c.post("/disk_usage", usage, &result)
 }
 
 // GetLatestDiskUsage retrieves the most recent disk usage record
 func (c *Client) GetLatestDiskUsage() (*DiskUsage, error) {
-        var usages []DiskUsage
-        err := c.get("/disk_usage?order=recorded_at.desc&limit=1", &usages)
-        if err != nil {
-                return nil, err
-        }
-        if len(usages) == 0 {
-                return nil, fmt.Errorf("no disk usage records found")
-        }
-        return &usages[0], nil
+	var usages []DiskUsage
+	err := c.get("/disk_usage?order=recorded_at.desc&limit=1", &usages)
+	if err != nil {
+		return nil, err
+	}
+	if len(usages) == 0 {
+		return nil, fmt.Errorf("no disk usage records found")
+	}
+	return &usages[0], nil
 }
 
 // ============================================================================
@@ -595,51 +624,51 @@ func (c *Client) GetLatestDiskUsage() (*DiskUsage, error) {
 // ============================================================================
 
 type UploadJournal struct {
-        ID         string `json:"id,omitempty"`
-        FileHash   string `json:"file_hash"`
-        Filename   string `json:"filename"`
-        Host       string `json:"host"`
-        Status     string `json:"status"`
-        ErrorMsg   string `json:"error_msg,omitempty"`
-        FileSize   int64  `json:"file_size,omitempty"`
-        InstanceID string `json:"instance_id,omitempty"`
-        CreatedAt  string `json:"created_at,omitempty"`
-        UpdatedAt  string `json:"updated_at,omitempty"`
+	ID         string `json:"id,omitempty"`
+	FileHash   string `json:"file_hash"`
+	Filename   string `json:"filename"`
+	Host       string `json:"host"`
+	Status     string `json:"status"`
+	ErrorMsg   string `json:"error_msg,omitempty"`
+	FileSize   int64  `json:"file_size,omitempty"`
+	InstanceID string `json:"instance_id,omitempty"`
+	CreatedAt  string `json:"created_at,omitempty"`
+	UpdatedAt  string `json:"updated_at,omitempty"`
 }
 
 // SaveJournalEntry creates or updates an upload journal entry.
 // Uses on_conflict to upsert by (file_hash, host).
 func (c *Client) SaveJournalEntry(entry *UploadJournal) error {
-        resp, err := c.requestWithRetry("POST", "/upload_journal?on_conflict=file_hash,host", entry)
-        if err != nil {
-                return err
-        }
-        defer resp.Body.Close()
+	resp, err := c.requestWithRetry("POST", "/upload_journal?on_conflict=file_hash,host", entry)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
 
-        if resp.StatusCode >= 400 {
-                bodyBytes, _ := io.ReadAll(resp.Body)
-                return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(bodyBytes))
-        }
-        return nil
+	if resp.StatusCode >= 400 {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+	return nil
 }
 
 // GetJournalByHash retrieves all journal entries for a given file hash.
 func (c *Client) GetJournalByHash(fileHash string) ([]UploadJournal, error) {
-        var entries []UploadJournal
-        err := c.get(fmt.Sprintf("/upload_journal?file_hash=eq.%s&order=host.asc", url.QueryEscape(fileHash)), &entries)
-        return entries, err
+	var entries []UploadJournal
+	err := c.get(fmt.Sprintf("/upload_journal?file_hash=eq.%s&order=host.asc", url.QueryEscape(fileHash)), &entries)
+	return entries, err
 }
 
 // GetJournalEntriesByStatus retrieves all journal entries with a given status.
 func (c *Client) GetJournalEntriesByStatus(status string) ([]UploadJournal, error) {
-        var entries []UploadJournal
-        err := c.get(fmt.Sprintf("/upload_journal?status=eq.%s&order=created_at.desc", url.QueryEscape(status)), &entries)
-        return entries, err
+	var entries []UploadJournal
+	err := c.get(fmt.Sprintf("/upload_journal?status=eq.%s&order=created_at.desc", url.QueryEscape(status)), &entries)
+	return entries, err
 }
 
 // DeleteJournalByHash removes all journal entries for a file hash (e.g. after local file is deleted).
 func (c *Client) DeleteJournalByHash(fileHash string) error {
-        return c.delete(fmt.Sprintf("/upload_journal?file_hash=eq.%s", url.QueryEscape(fileHash)))
+	return c.delete(fmt.Sprintf("/upload_journal?file_hash=eq.%s", url.QueryEscape(fileHash)))
 }
 
 // ============================================================================
@@ -649,47 +678,47 @@ func (c *Client) DeleteJournalByHash(fileHash string) error {
 // Schema defined in migrate.sql (CREATE TABLE pipeline_states).
 
 type PipelineState struct {
-        FileHash     string `json:"file_hash"`
-        FilePath     string `json:"file_path"`
-        Filename     string `json:"filename"`
-        Username     string `json:"username"`
-        FileSize     int64  `json:"file_size"`
-        CurrentStage string `json:"current_stage"`
-        Failed       bool   `json:"failed"`
-        LastError    string `json:"last_error,omitempty"`
-        ThumbURL     string `json:"thumb_url,omitempty"`
-        SpriteURL    string `json:"sprite_url,omitempty"`
-        PreviewURL   string `json:"preview_url,omitempty"`
-        EmbedURL     string `json:"embed_url,omitempty"`
-        LinksJSON    string `json:"links,omitempty"` // JSON-encoded map[string]string
-        CreatedAt    string `json:"created_at,omitempty"`
-        UpdatedAt    string `json:"updated_at,omitempty"`
+	FileHash     string `json:"file_hash"`
+	FilePath     string `json:"file_path"`
+	Filename     string `json:"filename"`
+	Username     string `json:"username"`
+	FileSize     int64  `json:"file_size"`
+	CurrentStage string `json:"current_stage"`
+	Failed       bool   `json:"failed"`
+	LastError    string `json:"last_error,omitempty"`
+	ThumbURL     string `json:"thumb_url,omitempty"`
+	SpriteURL    string `json:"sprite_url,omitempty"`
+	PreviewURL   string `json:"preview_url,omitempty"`
+	EmbedURL     string `json:"embed_url,omitempty"`
+	LinksJSON    string `json:"links,omitempty"` // JSON-encoded map[string]string
+	CreatedAt    string `json:"created_at,omitempty"`
+	UpdatedAt    string `json:"updated_at,omitempty"`
 }
 
 // SavePipelineState upserts a pipeline state by file_hash.
 func (c *Client) SavePipelineState(state *PipelineState) error {
-        resp, err := c.requestWithRetry("POST", "/pipeline_states?on_conflict=file_hash", state)
-        if err != nil {
-                return err
-        }
-        defer resp.Body.Close()
-        if resp.StatusCode >= 400 {
-                bodyBytes, _ := io.ReadAll(resp.Body)
-                return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(bodyBytes))
-        }
-        return nil
+	resp, err := c.requestWithRetry("POST", "/pipeline_states?on_conflict=file_hash", state)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+	return nil
 }
 
 // LoadAllPipelineStates retrieves all pipeline states (for crash recovery on restart).
 func (c *Client) LoadAllPipelineStates() ([]PipelineState, error) {
-        var states []PipelineState
-        err := c.get("/pipeline_states?order=created_at.asc", &states)
-        return states, err
+	var states []PipelineState
+	err := c.get("/pipeline_states?order=created_at.asc", &states)
+	return states, err
 }
 
 // DeletePipelineState removes a pipeline state by file hash.
 func (c *Client) DeletePipelineState(fileHash string) error {
-        return c.delete(fmt.Sprintf("/pipeline_states?file_hash=eq.%s", url.QueryEscape(fileHash)))
+	return c.delete(fmt.Sprintf("/pipeline_states?file_hash=eq.%s", url.QueryEscape(fileHash)))
 }
 
 // ============================================================================
@@ -698,21 +727,21 @@ func (c *Client) DeletePipelineState(fileHash string) error {
 
 // HealthCheck verifies the database connection
 func (c *Client) HealthCheck() error {
-        resp, err := c.request("GET", "/app_settings?key=eq.__healthcheck__&select=key&limit=1", nil)
-        if err != nil {
-                return fmt.Errorf("health check request failed: %w", err)
-        }
-        defer resp.Body.Close()
+	resp, err := c.request("GET", "/app_settings?key=eq.__healthcheck__&select=key&limit=1", nil)
+	if err != nil {
+		return fmt.Errorf("health check request failed: %w", err)
+	}
+	defer resp.Body.Close()
 
-        switch resp.StatusCode {
-        case 200:
-                return nil
-        case 404:
-                return fmt.Errorf("app_settings table not found (HTTP 404) — run the SQL migration first")
-        case 401, 403:
-                return fmt.Errorf("authentication failed (HTTP %d) — check SUPABASE_API_KEY and RLS policies", resp.StatusCode)
-        default:
-                body, _ := io.ReadAll(resp.Body)
-                return fmt.Errorf("unexpected response (HTTP %d): %s", resp.StatusCode, string(body))
-        }
+	switch resp.StatusCode {
+	case 200:
+		return nil
+	case 404:
+		return fmt.Errorf("app_settings table not found (HTTP 404) — run the SQL migration first")
+	case 401, 403:
+		return fmt.Errorf("authentication failed (HTTP %d) — check SUPABASE_API_KEY and RLS policies", resp.StatusCode)
+	default:
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("unexpected response (HTTP %d): %s", resp.StatusCode, string(body))
+	}
 }

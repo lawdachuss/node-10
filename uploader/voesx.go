@@ -53,15 +53,20 @@ type voeSXUploadResponse struct {
 	Success bool   `json:"success"`
 	Message string `json:"message"`
 	File    struct {
-		ID                 int    `json:"id"`
-		FileCode           string `json:"file_code"`
-		FileTitle          string `json:"file_title"`
-		EncodingNecessary  bool   `json:"encoding_necessary"`
+		ID                int    `json:"id"`
+		FileCode          string `json:"file_code"`
+		FileTitle         string `json:"file_title"`
+		EncodingNecessary bool   `json:"encoding_necessary"`
 	} `json:"file"`
 }
 
 // Upload uploads a file to VOE.sx and returns the view link
 func (u *VoeSXUploader) Upload(filePath string) (string, error) {
+	return u.UploadWithProgress(filePath, nil)
+}
+
+// UploadWithProgress uploads a file to VOE.sx and reports progress through fn.
+func (u *VoeSXUploader) UploadWithProgress(filePath string, progress ProgressFunc) (string, error) {
 	if u.apiKey == "" {
 		return "", fmt.Errorf("VOE.sx API key not configured")
 	}
@@ -70,7 +75,7 @@ func (u *VoeSXUploader) Upload(filePath string) (string, error) {
 	defer func() { <-voeSXSem }()
 
 	var lastErr error
-	
+
 	// Retry with exponential backoff
 	maxAttempts := 3
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
@@ -78,8 +83,8 @@ func (u *VoeSXUploader) Upload(filePath string) (string, error) {
 			backoff := time.Duration((1<<uint(attempt-2))*5) * time.Second
 			time.Sleep(backoff)
 		}
-		
-		downloadLink, err := u.uploadFile(filePath)
+
+		downloadLink, err := u.uploadFile(filePath, progress)
 		if err != nil {
 			lastErr = fmt.Errorf("upload file: %w", err)
 			if attempt < maxAttempts {
@@ -87,17 +92,17 @@ func (u *VoeSXUploader) Upload(filePath string) (string, error) {
 			}
 			return "", lastErr
 		}
-		
+
 		return downloadLink, nil
 	}
-	
+
 	return "", lastErr
 }
 
 // getUploadServer gets the upload server URL from VOE.sx API
 func (u *VoeSXUploader) getUploadServer() (string, error) {
 	url := fmt.Sprintf("%s/upload/server?key=%s", voeSXAPIBase, u.apiKey)
-	
+
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return "", fmt.Errorf("create request: %w", err)
@@ -130,16 +135,16 @@ func (u *VoeSXUploader) getUploadServer() (string, error) {
 	return serverResp.Result, nil
 }
 
-func (u *VoeSXUploader) uploadFile(filePath string) (string, error) {
+func (u *VoeSXUploader) uploadFile(filePath string, progress ProgressFunc) (string, error) {
 	// Step 1: Get upload server
 	uploadServer, err := u.getUploadServer()
 	if err != nil {
 		return "", fmt.Errorf("get upload server: %w", err)
 	}
 
-	body, contentLen, contentType, file, err := multipartStream(
+	body, contentLen, contentType, file, err := multipartStreamWithProgress(
 		map[string]string{"key": u.apiKey},
-		"file", filePath, "VOE.sx",
+		"file", filePath, "VOE.sx", progress,
 	)
 	if err != nil {
 		return "", fmt.Errorf("multipart stream: %w", err)

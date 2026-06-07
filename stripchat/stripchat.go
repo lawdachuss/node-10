@@ -91,12 +91,24 @@ func (s *StripchatSite) FetchStream(ctx context.Context, req *internal.Req, user
 		}
 	}
 
+	// Stripchat's previewUrlThumbBig may be a cached CDN URL; append the
+	// snapshot timestamp to force a fresh image on each API poll, similar
+	// to how Chaturbate's thumb.live.mmcdn.com always returns the latest frame.
+	thumbURL := u.PreviewUrlThumbBig
+	if thumbURL != "" && u.SnapshotTimestamp > 0 {
+		if strings.Contains(thumbURL, "?") {
+			thumbURL = fmt.Sprintf("%s&t=%d", thumbURL, u.SnapshotTimestamp)
+		} else {
+			thumbURL = fmt.Sprintf("%s?t=%d", thumbURL, u.SnapshotTimestamp)
+		}
+	}
+
 	info := &site.StreamInfo{
 		RoomStatus:   roomStatus,
 		RoomTitle:    resp.Cam.Topic,
 		Tags:         tags,
 		Gender:       mapGender(u.BroadcastGender),
-		LiveThumbURL: u.PreviewUrlThumbBig,
+		LiveThumbURL: thumbURL,
 	}
 
 	if !u.IsOnline && !u.IsLive {

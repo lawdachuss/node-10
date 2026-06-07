@@ -78,6 +78,22 @@ func WarmupChaturbate(ctx context.Context) {
 	resp.Body.Close()
 }
 
+// WarmupStripchat makes an initial request to stripchat.com to establish TLS
+// session tickets before any API calls are made. This is the same idea as
+// WarmupChaturbate but for Stripchat's domain.
+func WarmupStripchat(ctx context.Context) {
+	req, err := http.NewRequestWithContext(ctx, "HEAD", "https://stripchat.com/", nil)
+	if err != nil {
+		return
+	}
+	SetRequestHeaders(req)
+	resp, err := sharedCloakTransport().RoundTrip(req)
+	if err != nil {
+		return
+	}
+	resp.Body.Close()
+}
+
 func (t *httpcloakTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if req.URL.Scheme == "http" {
 		return http.DefaultTransport.RoundTrip(req)

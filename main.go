@@ -234,6 +234,12 @@ func main() {
 				EnvVars: []string{"MAX_LOCAL_AGE_DAYS"},
 				Value:   0,
 			},
+			&cli.IntFlag{
+				Name:    "min-duration-before-upload",
+				Usage:   "Minimum video duration in seconds before uploading; shorter videos wait and merge with the next recording (0 = disabled)",
+				EnvVars: []string{"MIN_DURATION_BEFORE_UPLOAD"},
+				Value:   1200,
+			},
 			&cli.StringFlag{
 				Name:    "voesx-api-key",
 				Usage:   "API key for VOE.sx uploads",
@@ -326,11 +332,12 @@ func start(c *cli.Context) error {
 		fmt.Println()
 	}
 
-	// Warm up TLS session with Cloudflare before any API calls.
-	// This establishes TLS session tickets via a HEAD request to chaturbate.com,
-	// so subsequent API calls use TLS resumption (like a returning browser).
+	// Warm up TLS sessions with Cloudflare before any API calls.
+	// This establishes TLS session tickets via HEAD requests to both chaturbate.com
+	// and stripchat.com, so subsequent API calls use TLS resumption (like a returning browser).
 	ctx, warmupCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	internal.WarmupChaturbate(ctx)
+	internal.WarmupStripchat(ctx)
 	warmupCancel()
 
 	server.Manager, err = manager.New()
@@ -430,14 +437,15 @@ func start(c *cli.Context) error {
 	go server.StartDiskMonitor(diskMonitorStop)
 
 		if err := server.Manager.CreateChannel(&entity.ChannelConfig{
-				Site:        c.String("site"),
-				Username:    c.String("username"),
-				Framerate:   c.Int("framerate"),
-				Resolution:  c.Int("resolution"),
-				Pattern:     c.String("pattern"),
-				MaxDuration: c.Int("max-duration"),
-				MaxFilesize: c.Int("max-filesize"),
-				Compress:    c.Bool("compress"),
+				Site:                    c.String("site"),
+				Username:                c.String("username"),
+				Framerate:               c.Int("framerate"),
+				Resolution:              c.Int("resolution"),
+				Pattern:                 c.String("pattern"),
+				MaxDuration:             c.Int("max-duration"),
+				MaxFilesize:             c.Int("max-filesize"),
+				Compress:                c.Bool("compress"),
+				MinDurationBeforeUpload: c.Int("min-duration-before-upload"),
 			}, false); err != nil {
 		return fmt.Errorf("create channel: %w", err)
 	}

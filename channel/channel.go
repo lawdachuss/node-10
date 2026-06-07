@@ -246,11 +246,11 @@ func (ch *Channel) ExportStatusInfo() *entity.ChannelInfo {
 }
 
 func (ch *Channel) exportInfo(includeLogs bool) *entity.ChannelInfo {
+	ch.stateMu.Lock()
 	var streamedAt string
 	if ch.StreamedAt != 0 {
 		streamedAt = time.Unix(ch.StreamedAt, 0).Format("2006-01-02 15:04 AM")
 	}
-	ch.stateMu.Lock()
 	isOnline := ch.IsOnline
 	isConnecting := ch.IsConnecting
 	roomStatus := ch.RoomStatus

@@ -64,14 +64,15 @@ func Index(c *gin.Context) {
 
 // CreateChannelRequest represents the request body for creating a channel.
 type CreateChannelRequest struct {
-        Site        string `form:"site"`
-        Username    string `form:"username" binding:"required"`
-        Framerate   int    `form:"framerate" binding:"required"`
-        Resolution  int    `form:"resolution" binding:"required"`
-        Pattern     string `form:"pattern" binding:"required"`
-        MaxDuration int    `form:"max_duration"`
-        MaxFilesize int    `form:"max_filesize"`
-        Compress    bool   `form:"compress"`
+	Site                    string `form:"site"`
+	Username                string `form:"username" binding:"required"`
+	Framerate               int    `form:"framerate" binding:"required"`
+	Resolution              int    `form:"resolution" binding:"required"`
+	Pattern                 string `form:"pattern" binding:"required"`
+	MaxDuration             int    `form:"max_duration"`
+	MaxFilesize             int    `form:"max_filesize"`
+	Compress                bool   `form:"compress"`
+	MinDurationBeforeUpload int    `form:"min_duration_before_upload"`
 }
 
 // CreateChannel creates a new channel.
@@ -84,17 +85,18 @@ func CreateChannel(c *gin.Context) {
 
         var lastErr error
         for _, username := range strings.Split(req.Username, ",") {
-                if err := server.Manager.CreateChannel(&entity.ChannelConfig{
-                        Site:        req.Site,
-                        Username:    username,
-                        Framerate:   req.Framerate,
-                        Resolution:  req.Resolution,
-                        Pattern:     req.Pattern,
-                        MaxDuration: req.MaxDuration,
-                        MaxFilesize: req.MaxFilesize,
-                        Compress:    req.Compress,
-                        CreatedAt:   time.Now().Unix(),
-                }, true); err != nil {
+		if err := server.Manager.CreateChannel(&entity.ChannelConfig{
+				Site:                    req.Site,
+				Username:                username,
+				Framerate:               req.Framerate,
+				Resolution:              req.Resolution,
+				Pattern:                 req.Pattern,
+				MaxDuration:             req.MaxDuration,
+				MaxFilesize:             req.MaxFilesize,
+				Compress:                req.Compress,
+				MinDurationBeforeUpload: req.MinDurationBeforeUpload,
+				CreatedAt:               time.Now().Unix(),
+			}, true); err != nil {
                         lastErr = err
                         fmt.Printf("[ERROR] create channel %s: %v\n", username, err)
                 }
@@ -945,31 +947,47 @@ func ServeLiveThumb(c *gin.Context) {
 	}
 
 	// Only extract from files being actively recorded (< 60s since last write).
+	// Try sseof first (seeks near end by bytes, works with fMP4 absolute PTS),
+	// then fall back to the original -ss approach, then the upstream CDN.
 	if newest != "" && time.Since(newestMod) < 60*time.Second {
 		cachePath := filepath.Join(os.TempDir(), "opencode-thumb-"+username+".jpg")
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		config.AcquireFFmpeg()
-		err := config.FFmpegCommandContext(ctx,
-			"-y",
-			"-ss", "00:00:01",
-			"-i", newest,
-			"-vframes", "1",
-			"-vf", "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2",
-			"-q:v", "2",
-			cachePath,
-		).Run()
-		config.ReleaseFFmpeg()
-		cancel()
-		if err == nil {
-			data, readErr := os.ReadFile(cachePath)
-			if readErr == nil {
-				ct := http.DetectContentType(data)
-				thumbCacheMu.Lock()
-				thumbCache[username] = thumbCacheEntry{data: data, contentType: ct, expiresAt: time.Now().Add(5 * time.Second)}
-				thumbCacheMu.Unlock()
-				c.Data(http.StatusOK, ct, data)
-				return
+		var thumbOK bool
+
+		// Attempt 1: seek near end of file (gives a recent frame for any container).
+		for attempt := 0; attempt < 2; attempt++ {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			config.AcquireFFmpeg()
+			args := []string{"-y"}
+			if attempt == 0 {
+				args = append(args, "-sseof", "-3")
+			} else {
+				args = append(args, "-ss", "00:00:01")
 			}
+			args = append(args,
+				"-i", newest,
+				"-vframes", "1",
+				"-vf", "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2",
+				"-q:v", "2",
+				cachePath,
+			)
+			err := config.FFmpegCommandContext(ctx, args...).Run()
+			config.ReleaseFFmpeg()
+			cancel()
+			if err == nil {
+				data, readErr := os.ReadFile(cachePath)
+				if readErr == nil {
+					thumbOK = true
+					ct := http.DetectContentType(data)
+					thumbCacheMu.Lock()
+					thumbCache[username] = thumbCacheEntry{data: data, contentType: ct, expiresAt: time.Now().Add(5 * time.Second)}
+					thumbCacheMu.Unlock()
+					c.Data(http.StatusOK, ct, data)
+					break
+				}
+			}
+		}
+		if thumbOK {
+			return
 		}
 	}
 

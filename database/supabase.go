@@ -262,6 +262,7 @@ type Recording struct {
 	Resolution   string   `json:"resolution,omitempty"`
 	Framerate    int      `json:"framerate"`
 	Filesize     int64    `json:"filesize"`
+	Duration     float64  `json:"duration"`
 	Gender       string   `json:"gender,omitempty"`
 	ThumbnailURL string   `json:"thumbnail_url,omitempty"`
 	SpriteURL    string   `json:"sprite_url,omitempty"`

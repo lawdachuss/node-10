@@ -57,6 +57,16 @@ type Pipeline struct {
 	Failed       bool   `json:"failed"`
 	LastError    string `json:"last_error"`
 
+	// Channel metadata snapshot captured at enqueue time so stageSaveMetadata
+	// uses the state from when the file was recorded, not whatever a newer
+	// recording session may have written to the Channel struct.
+	RoomTitle  string   `json:"room_title"`
+	Tags       []string `json:"tags"`
+	Viewers    int      `json:"viewers"`
+	Gender     string   `json:"gender"`
+	Resolution string   `json:"resolution"`
+	Framerate  int      `json:"framerate"`
+
 	// Results populated by stages, consumed by downstream stages
 	ThumbURL   string            `json:"thumb_url"`
 	SpriteURL  string            `json:"sprite_url"`
@@ -393,18 +403,34 @@ func (p *Pipeline) stageSaveMetadata(ch *Channel) error {
 		return nil
 	}
 
-	timestamp := time.Now().UTC().Format("2006-01-02T15:04:05Z")
+	timestamp := extractTimestampFromFilename(p.Filename)
+	if timestamp == "" {
+		// Fall back to file modification time.
+		if st, err := os.Stat(p.FilePath); err == nil {
+			timestamp = st.ModTime().UTC().Format("2006-01-02T15:04:05Z")
+		} else {
+			timestamp = time.Now().UTC().Format("2006-01-02T15:04:05Z")
+		}
+	}
+
+	// Extract real duration from the video file.
+	dur, probeErr := VideoDurationSeconds(p.FilePath)
+	if probeErr != nil {
+		ch.Warn("upload: could not probe duration for %s: %v", p.Filename, probeErr)
+	}
+
 	if err := server.SaveRecordingWithLinks(
 		ch.Config.Username,
 		p.Filename,
 		timestamp,
-		ch.RoomTitle,
-		ch.Tags,
-		ch.Viewers,
-		ch.Resolution,
-		ch.Framerate,
+		p.RoomTitle,
+		p.Tags,
+		p.Viewers,
+		p.Resolution,
+		p.Framerate,
 		p.FileSize,
-		ch.Gender,
+		dur,
+		p.Gender,
 		p.EmbedURL,
 		p.ThumbURL,
 		p.SpriteURL,
@@ -703,7 +729,6 @@ func (pq *PipelineQueue) EnqueueFile(filePath string) {
 	}
 
 	MarkUploadInFlight(filePath)
-	pq.ch.UploadWg.Add(1)
 
 	fileHash, hashErr := internal.FastFileHash(filePath)
 	if hashErr != nil {
@@ -715,7 +740,36 @@ func (pq *PipelineQueue) EnqueueFile(filePath string) {
 		fileSize = stat.Size()
 	}
 
+	// If the pipeline queue has already stopped (graceful shutdown), save the
+	// pipeline state for recovery on next start instead of enqueuing.  This
+	// prevents UploadWg leaking when EnqueueFile races with Stop().
+	pq.mu.Lock()
+	if pq.stopped {
+		pq.mu.Unlock()
+		pq.ch.Warn("pipeline: queue stopped, saving %s for recovery on next start", base)
+		recoveryPipeline := newPipeline(filePath, fileHash, base, pq.ch.Config.Username, fileSize)
+		if saveErr := server.SavePipelineState(recoveryPipeline.toDBState()); saveErr != nil {
+			pq.ch.Warn("pipeline: could not save recovery state for %s: %v", base, saveErr)
+		}
+		MarkUploadDone(filePath)
+		return
+	}
+	pq.mu.Unlock()
+
+	pq.ch.UploadWg.Add(1)
 	p := newPipeline(filePath, fileHash, base, pq.ch.Config.Username, fileSize)
+
+	// Snapshot channel metadata at enqueue time so stageSaveMetadata uses
+	// the state from when this file was recorded, not from a newer session.
+	pq.ch.stateMu.Lock()
+	p.RoomTitle = pq.ch.RoomTitle
+	p.Tags = append([]string{}, pq.ch.Tags...)
+	p.Viewers = pq.ch.Viewers
+	p.Gender = pq.ch.Gender
+	p.Resolution = pq.ch.Resolution
+	p.Framerate = pq.ch.Framerate
+	pq.ch.stateMu.Unlock()
+
 	pq.Enqueue(p)
 }
 

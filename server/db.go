@@ -499,7 +499,7 @@ func LoadRecordingsFromDB() []byte {
 // SaveRecordingWithLinks saves a recording and its upload links directly to Supabase.
 // Preview URLs should be saved separately via SavePreviewLinks before calling this.
 // This function only saves the recording metadata and upload links.
-func SaveRecordingWithLinks(username, filename, timestamp, roomTitle string, tags []string, viewers int, resolution string, framerate int, filesize int64, gender, embedURL, thumbnailURL, spriteURL, previewURL string, links map[string]string) error {
+func SaveRecordingWithLinks(username, filename, timestamp, roomTitle string, tags []string, viewers int, resolution string, framerate int, filesize int64, duration float64, gender, embedURL, thumbnailURL, spriteURL, previewURL string, links map[string]string) error {
 	client := GetDBClient()
 	if client == nil {
 		return fmt.Errorf("Supabase not configured")
@@ -516,6 +516,7 @@ func SaveRecordingWithLinks(username, filename, timestamp, roomTitle string, tag
 		Resolution:   resolution,
 		Framerate:    framerate,
 		Filesize:     filesize,
+		Duration:     duration,
 		Gender:       gender,
 		EmbedURL:     embedURL,
 		ThumbnailURL: thumbnailURL,

@@ -194,6 +194,12 @@ func (ch *Channel) uploadFile(filePath string, thumbURL, spriteURL, previewURL s
 
 		// Save directly to Supabase
 		timestamp := time.Now().UTC().Format("2006-01-02T15:04:05Z")
+
+		dur, probeErr := VideoDurationSeconds(filePath)
+		if probeErr != nil {
+			ch.Warn("upload: could not probe duration for %s: %v", filename, probeErr)
+		}
+
 		if err := server.SaveRecordingWithLinks(
 			ch.Config.Username,
 			filename,
@@ -204,6 +210,7 @@ func (ch *Channel) uploadFile(filePath string, thumbURL, spriteURL, previewURL s
 			ch.Resolution,
 			ch.Framerate,
 			filesize,
+			dur,
 			ch.Gender,
 			embedURL,
 			thumbURL,

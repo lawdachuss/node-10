@@ -77,6 +77,7 @@ CREATE TABLE IF NOT EXISTS recordings (
     resolution VARCHAR(50),
     framerate INTEGER,
     filesize BIGINT DEFAULT 0,
+    duration DOUBLE PRECISION DEFAULT 0,
     gender VARCHAR(50),
     thumbnail_url TEXT,
     sprite_url TEXT,

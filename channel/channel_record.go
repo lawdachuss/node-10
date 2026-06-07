@@ -117,11 +117,11 @@ func (ch *Channel) RecordStream(ctx context.Context, siteImpl site.Site, req *in
 		return fmt.Errorf("get stream: %w", err)
 	}
 
+	ch.stateMu.Lock()
 	ch.RoomTitle = info.RoomTitle
 	ch.Tags = info.Tags
 	ch.Viewers = info.NumUsers
 	ch.Gender = info.Gender
-	ch.stateMu.Lock()
 	ch.LiveThumbURL = info.LiveThumbURL
 	ch.stateMu.Unlock()
 
@@ -191,11 +191,13 @@ func (ch *Channel) recordStreamSC(ctx context.Context, req *internal.Req, info *
 }
 
 func (ch *Channel) initRecordingState(hasSeparateAudio bool) {
+	ch.stateMu.Lock()
 	ch.StreamedAt = time.Now().Unix()
 	ch.Sequence = 0
+	ch.HasSeparateAudio = hasSeparateAudio
+	ch.stateMu.Unlock()
 	ch.InitSegment = nil
 	ch.AudioInitSegment = nil
-	ch.HasSeparateAudio = hasSeparateAudio
 	ch.switchRequested = false
 	ch.videoSegmentCount = 0
 	ch.audioSegmentCount = 0
@@ -406,7 +408,7 @@ func (ch *Channel) watchLoopSC(ctx context.Context, client *internal.Req, p *str
 }
 
 func (ch *Channel) watchLoopSCWithRetry(ctx context.Context, client *internal.Req, p *stripchat.Playlist, retryCount int) error {
-	const maxRetries = 3
+	const maxRetries = 50
 
 	err := p.WatchAVSegments(ctx, ch.HandleSegment, ch.HandleInitSegment, ch.HandleAudioSegment, ch.HandleAudioInitSegment, ch.OnPollComplete)
 	if err != nil && errors.Is(err, internal.ErrStreamStalled) {
@@ -415,17 +417,18 @@ func (ch *Channel) watchLoopSCWithRetry(ctx context.Context, client *internal.Re
 			return fmt.Errorf("max CDN refreshes exceeded: %w", err)
 		}
 
-		ch.Info("recording: CDN session expired — fetching fresh playlist URL (attempt %d/%d)", retryCount+1, maxRetries)
+		ch.Info("recording: CDN session expired — fetching fresh stream URL (attempt %d/%d)", retryCount+1, maxRetries)
 
-		// Check if the channel is actually still online before trying to reconnect.
+		// Fetch a brand new stream URL from the API (fresh CDN edge) rather than
+		// reusing the old MasterURL that may have a bad route through the proxy.
 		siteImpl := stripchat.NewStripchatSite()
-		_, fetchErr := siteImpl.FetchStream(ctx, client, ch.Config.Username)
+		info, fetchErr := siteImpl.FetchStream(ctx, client, ch.Config.Username)
 		if fetchErr != nil {
 			ch.Info("recording: channel appears offline after CDN expiry (%s)", fetchErr)
 			return fetchErr
 		}
 
-		newPlaylist, apiErr := stripchat.FetchPlaylist(ctx, client, p.MasterURL, p.PDKey, ch.Config.Resolution, ch.Config.Framerate)
+		newPlaylist, apiErr := stripchat.FetchPlaylist(ctx, client, info.HLSSource, p.PDKey, ch.Config.Resolution, ch.Config.Framerate)
 		if apiErr != nil {
 			return apiErr
 		}

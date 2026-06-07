@@ -303,6 +303,7 @@ func main() {
 }
 
 func start(c *cli.Context) error {
+	started := time.Now()
 	fmt.Println(logo)
 
 	var err error
@@ -310,6 +311,7 @@ func start(c *cli.Context) error {
 	if err != nil {
 		return fmt.Errorf("new config: %w", err)
 	}
+	fmt.Printf("[startup] config loaded in %v\n", time.Since(started).Round(time.Millisecond))
 
 	// Load cookies from Supabase if available (overrides .env)
 	if server.Config.SupabaseURL != "" && server.Config.SupabaseAPIKey != "" {
@@ -335,15 +337,21 @@ func start(c *cli.Context) error {
 	// Warm up TLS sessions with Cloudflare before any API calls.
 	// This establishes TLS session tickets via HEAD requests to both chaturbate.com
 	// and stripchat.com, so subsequent API calls use TLS resumption (like a returning browser).
-	ctx, warmupCancel := context.WithTimeout(context.Background(), 15*time.Second)
-	internal.WarmupChaturbate(ctx)
-	internal.WarmupStripchat(ctx)
+	// Each domain gets its own 10s timeout so a dead proxy on one doesn't cascade delays.
+	warmupT := time.Now()
+	warmupCtx, warmupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	internal.WarmupChaturbate(warmupCtx)
 	warmupCancel()
+	warmupCtx, warmupCancel = context.WithTimeout(context.Background(), 10*time.Second)
+	internal.WarmupStripchat(warmupCtx)
+	warmupCancel()
+	fmt.Printf("[startup] TLS warmup completed in %v\n", time.Since(warmupT).Round(time.Millisecond))
 
 	server.Manager, err = manager.New()
 	if err != nil {
 		return fmt.Errorf("new manager: %w", err)
 	}
+	fmt.Printf("[startup] manager created in %v\n", time.Since(started).Round(time.Millisecond))
 
 	// Graceful shutdown: catch SIGTERM/SIGINT, stop all recording
 	// channels first (so their Cleanup() runs and queues files into
@@ -420,16 +428,21 @@ func start(c *cli.Context) error {
 			fmt.Println("🚇 Tunnel disabled (--no-tunnel) — script will manage it separately")
 		}
 
+		loadT := time.Now()
 		if err := server.Manager.LoadConfig(); err != nil {
 			return fmt.Errorf("load config: %w", err)
 		}
+		fmt.Printf("[startup] LoadConfig completed in %v\n", time.Since(loadT).Round(time.Millisecond))
 
 		server.Manager.StartSession(server.Config.SessionDurationParsed)
 
 		// Start background disk monitor
 		go server.StartDiskMonitor(diskMonitorStop)
 
-		return router.SetupRouter().Run(":" + c.String("port"))
+		bindT := time.Now()
+		err := router.SetupRouter().Run(":" + c.String("port"))
+		fmt.Printf("[startup] HTTP server listened for %v before returning\n", time.Since(bindT).Round(time.Millisecond))
+		return err
 	}
 
 	// else create a channel with the provided username

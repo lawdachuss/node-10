@@ -72,9 +72,25 @@ func supabaseRequest(method, path string, body []byte) (*http.Response, error) {
 // Avoids creating a new TCP+TLS connection on every call.
 var supabaseHTTPClient = &http.Client{Timeout: 60 * time.Second}
 
+// fastHTTPClient is used for startup calls (LoadSettingsFromDB, LoadChannelsFromDB)
+// so the web server starts quickly even when Supabase is slow or unreachable.
+var fastHTTPClient = &http.Client{Timeout: 10 * time.Second}
+
 // supabaseRequestWithPrefer is the low-level HTTP helper. Pass an empty string
 // for prefer to omit the header entirely.
 func supabaseRequestWithPrefer(method, path string, body []byte, prefer string) (*http.Response, error) {
+	return supabaseRequestWithClient(method, path, body, prefer, supabaseHTTPClient)
+}
+
+// supabaseRequestFast is like supabaseRequestWithPrefer but uses a shorter 10s
+// timeout.  Used during startup so the web server binds quickly even when
+// Supabase is unreachable or slow.
+func supabaseRequestFast(method, path string, body []byte, prefer string) (*http.Response, error) {
+	return supabaseRequestWithClient(method, path, body, prefer, fastHTTPClient)
+}
+
+// supabaseRequestWithClient is the low-level HTTP helper using the given client.
+func supabaseRequestWithClient(method, path string, body []byte, prefer string, client *http.Client) (*http.Response, error) {
 	baseURL := supabaseRestURL()
 	apiKey := supabaseRestAPIKey()
 	if baseURL == "" || apiKey == "" {
@@ -97,7 +113,7 @@ func supabaseRequestWithPrefer(method, path string, body []byte, prefer string) 
 	if prefer != "" {
 		req.Header.Set("Prefer", prefer)
 	}
-	return supabaseHTTPClient.Do(req)
+	return client.Do(req)
 }
 
 // CheckSupabase verifies the app_settings table is reachable via the REST API.
@@ -172,31 +188,42 @@ func saveJSONSetting(key string, data []byte) error {
 // loadJSONSetting reads a JSON value from the app_settings table via REST.
 // Returns nil if the key is not found or on any error.
 func loadJSONSetting(key string) []byte {
-        resp, err := supabaseRequest("GET",
-                "/app_settings?key=eq."+key+"&select=value", nil)
-        if err != nil {
-                return nil
-        }
-        defer resp.Body.Close()
-        if resp.StatusCode != 200 {
-                return nil
-        }
+	return loadJSONSettingWithClient(key, supabaseHTTPClient)
+}
 
-        body, err := io.ReadAll(resp.Body)
-        if err != nil {
-                return nil
-        }
+// loadJSONSettingFast is like loadJSONSetting but uses the fast (10s) client.
+// Used during startup so the web server binds quickly even when Supabase is
+// unreachable or slow.
+func loadJSONSettingFast(key string) []byte {
+	return loadJSONSettingWithClient(key, fastHTTPClient)
+}
 
-        var entries []struct {
-                Value json.RawMessage `json:"value"`
-        }
-        if err := json.Unmarshal(body, &entries); err != nil {
-                return nil
-        }
-        if len(entries) == 0 {
-                return nil
-        }
-        return []byte(string(entries[0].Value))
+func loadJSONSettingWithClient(key string, client *http.Client) []byte {
+	resp, err := supabaseRequestWithClient("GET",
+		"/app_settings?key=eq."+key+"&select=value", nil, "", client)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return nil
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil
+	}
+
+	var entries []struct {
+		Value json.RawMessage `json:"value"`
+	}
+	if err := json.Unmarshal(body, &entries); err != nil {
+		return nil
+	}
+	if len(entries) == 0 {
+		return nil
+	}
+	return []byte(string(entries[0].Value))
 }
 
 // ─── Channels ─────────────────────────────────────────────────────────────────
@@ -269,12 +296,13 @@ func LoadChannelsFromDB() []byte {
 	}
 
 	// Read the instance-namespaced channel list blob from app_settings.
-	if data := loadJSONSetting(channelsKey()); data != nil {
+	// Use the fast (10s) client so the web server starts quickly even when
+	// Supabase is unreachable or slow.
+	if data := loadJSONSettingFast(channelsKey()); data != nil {
 		return data
 	}
 
 	// No channels configured yet for this instance.
-	fmt.Printf("[INFO] LoadChannelsFromDB: no channels blob found for instance %q\n", instanceID)
 	return nil
 }
 
@@ -288,7 +316,9 @@ func SaveSettingsToDB(data []byte) error {
 }
 
 func LoadSettingsFromDB() []byte {
-        return loadJSONSetting("dvr_settings")
+	// Use the fast (10s) client so the web server starts quickly even when
+	// Supabase is unreachable or slow.
+	return loadJSONSettingFast("dvr_settings")
 }
 
 // ─── Recordings ───────────────────────────────────────────────────────────────

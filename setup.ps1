@@ -17,7 +17,7 @@ Write-Host "╚═════════════════════�
 Write-Host ""
 
 # ── 1. Install FFmpeg via winget ──────────────────────────
-Write-Host "[1/7] Installing FFmpeg..." -ForegroundColor Yellow
+Write-Host "[1/8] Installing FFmpeg..." -ForegroundColor Yellow
 $ffmpeg = Get-Command ffmpeg.exe -ErrorAction SilentlyContinue
 if (-not $ffmpeg) {
     winget install Gyan.FFmpeg.Essentials --accept-package-agreements --accept-source-agreements
@@ -50,7 +50,7 @@ if (-not $ffmpeg) {
 }
 
 # ── 2. Ensure ffmpeg is in PATH (for child processes like the DVR) ──
-Write-Host "[2/7] Ensuring ffmpeg is on PATH..." -ForegroundColor Yellow
+Write-Host "[2/8] Ensuring ffmpeg is on PATH..." -ForegroundColor Yellow
 $ffmpeg = Get-Command ffmpeg.exe -ErrorAction SilentlyContinue
 if (-not $ffmpeg) {
     Write-Host "ERROR: ffmpeg not found in PATH — DVR will fail to mux/thumbnail" -ForegroundColor Red
@@ -68,7 +68,7 @@ if ($userPath -notlike "*$ffmpegDir*") {
 $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [Environment]::GetEnvironmentVariable("Path", "User")
 
 # ── 3. Install cloudflared ────────────────────────────────
-Write-Host "[3/7] Installing cloudflared..." -ForegroundColor Yellow
+Write-Host "[3/8] Installing cloudflared..." -ForegroundColor Yellow
 $cf = Get-Command cloudflared -ErrorAction SilentlyContinue
 if (-not $cf) {
     winget install Cloudflare.cloudflared --accept-package-agreements --accept-source-agreements
@@ -84,7 +84,7 @@ if (-not $cf) {
 }
 
 # ── 4. Install Go via winget ──────────────────────────────
-Write-Host "[4/7] Installing Go..." -ForegroundColor Yellow
+Write-Host "[4/8] Installing Go..." -ForegroundColor Yellow
 $go = Get-Command go -ErrorAction SilentlyContinue
 if (-not $go) {
     winget install GoLang.Go --accept-package-agreements --accept-source-agreements
@@ -100,20 +100,34 @@ if (-not $go) {
 }
 
 # ── 5. Install Go dependencies ────────────────────────────
-Write-Host "[5/7] Installing Go dependencies..." -ForegroundColor Yellow
+Write-Host "[5/8] Installing Go dependencies..." -ForegroundColor Yellow
 Set-Location -LiteralPath $ProjectDir
 go mod download
 Write-Host "  ✅ Go modules downloaded" -ForegroundColor Green
 
 # ── 6. Build Go binary ────────────────────────────────────
-Write-Host "[6/7] Building Go binary..." -ForegroundColor Yellow
+Write-Host "[6/8] Building Go binary..." -ForegroundColor Yellow
 go build -o chaturbate-dvr.exe .
 Write-Host "  ✅ Build complete" -ForegroundColor Green
 
 # ── 7. Install Node.js dependencies ───────────────────────
-Write-Host "[7/7] Installing Node.js dependencies..." -ForegroundColor Yellow
+Write-Host "[7/8] Installing Node.js dependencies..." -ForegroundColor Yellow
 npm install
 Write-Host "  ✅ Node.js deps installed" -ForegroundColor Green
+
+# ── 8. Install Python dependencies ─────────────────────────
+Write-Host "[8/8] Installing Python dependencies (cookie refresher)..." -ForegroundColor Yellow
+$python = Get-Command python -ErrorAction SilentlyContinue
+if (-not $python) {
+    Write-Host "  ⚠️  Python not found -- skipping pip install" -ForegroundColor Yellow
+} else {
+    $pipResult = & pip install --default-timeout=120 -r "$ProjectDir\requirements.txt" 2>&1
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "  ✅ Python deps installed" -ForegroundColor Green
+    } else {
+        Write-Host "  ⚠️  pip install failed -- cookie refresher may not work" -ForegroundColor Yellow
+    }
+}
 
 # ── Copy .env if missing ──────────────────────────────────
 if (-not (Test-Path "$ProjectDir\.env")) {

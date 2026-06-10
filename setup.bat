@@ -21,7 +21,7 @@ echo ============================================
 echo.
 
 REM -- 1. Install FFmpeg via winget --
-echo [1/7] Installing FFmpeg...
+echo [1/8] Installing FFmpeg...
 where ffmpeg >nul 2>nul
 if %ERRORLEVEL% NEQ 0 (
     winget install Gyan.FFmpeg.Essentials --accept-package-agreements --accept-source-agreements
@@ -77,7 +77,7 @@ if %ERRORLEVEL% NEQ 0 (
 )
 
 REM -- 2. Ensure ffmpeg is in PATH --
-echo [2/7] Ensuring ffmpeg is on PATH...
+echo [2/8] Ensuring ffmpeg is on PATH...
 where ffmpeg >nul 2>nul
 if %ERRORLEVEL% NEQ 0 (
     REM Try to find it manually if where fails
@@ -136,7 +136,7 @@ set "PATH=%MachinePath%;%UserPath%;%ffmpegDir%"
 echo   [OK] ffmpeg added to current session PATH
 
 REM -- 3. Install cloudflared --
-echo [3/7] Installing cloudflared...
+echo [3/8] Installing cloudflared...
 where cloudflared >nul 2>nul
 if %ERRORLEVEL% NEQ 0 (
     winget install Cloudflare.cloudflared --accept-package-agreements --accept-source-agreements
@@ -154,7 +154,7 @@ if %ERRORLEVEL% NEQ 0 (
 )
 
 REM -- 4. Install Go via winget --
-echo [4/7] Installing Go...
+echo [4/8] Installing Go...
 where go >nul 2>nul
 if %ERRORLEVEL% NEQ 0 (
     winget install GoLang.Go --accept-package-agreements --accept-source-agreements
@@ -173,20 +173,34 @@ if %ERRORLEVEL% NEQ 0 (
 )
 
 REM -- 5. Install Go dependencies --
-echo [5/7] Installing Go dependencies...
+echo [5/8] Installing Go dependencies...
 cd /d "%ProjectDir%"
 call go mod download
 echo   [OK] Go modules downloaded
 
 REM -- 6. Build Go binary --
-echo [6/7] Building Go binary...
+echo [6/8] Building Go binary...
 call go build -o chaturbate-dvr.exe .
 echo   [OK] Build complete
 
 REM -- 7. Install Node.js dependencies --
-echo [7/7] Installing Node.js dependencies...
+echo [7/8] Installing Node.js dependencies...
 call npm install
 echo   [OK] Node.js deps installed
+
+REM -- 8. Install Python dependencies --
+echo [8/8] Installing Python dependencies (cookie refresher)...
+where python >nul 2>nul
+if %ERRORLEVEL% NEQ 0 (
+    echo   [WARN] Python not found -- skipping pip install
+) else (
+    pip install --default-timeout=120 -r "%ProjectDir%\requirements.txt"
+    if %ERRORLEVEL% EQU 0 (
+        echo   [OK] Python deps installed
+    ) else (
+        echo   [WARN] pip install failed -- cookie refresher may not work
+    )
+)
 
 REM -- Copy .env if missing --
 if not exist "%ProjectDir%\.env" (

@@ -1,0 +1,2 @@
+scrapling[fetchers]==0.4.8
+pysocks==1.7.1

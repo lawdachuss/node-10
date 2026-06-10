@@ -194,7 +194,7 @@ where python >nul 2>nul
 if %ERRORLEVEL% NEQ 0 (
     echo   [WARN] Python not found -- skipping pip install
 ) else (
-    pip install --default-timeout=120 -r "%ProjectDir%\requirements.txt"
+    pip install --disable-pip-version-check --default-timeout=120 -r "%ProjectDir%\requirements.txt"
     if %ERRORLEVEL% EQU 0 (
         echo   [OK] Python deps installed
     ) else (

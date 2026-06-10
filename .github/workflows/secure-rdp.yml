@@ -313,22 +313,18 @@ jobs:
           $pysocksWheel = "$env:TEMP\PySocks-1.7.1-py3-none-any.whl"
           curl.exe --noproxy "*" -sSfL --max-time 30 -o $pysocksWheel "https://files.pythonhosted.org/packages/8d/59/b4572118e098ac8e46e399a1dd0f2d85403ce8bbaad9ec79373ed6badaf9/PySocks-1.7.1-py3-none-any.whl"
           if ($LASTEXITCODE -eq 0 -and (Test-Path $pysocksWheel)) {
-            pip install $pysocksWheel
+            pip install --disable-pip-version-check $pysocksWheel
             Write-Host "[OK] PySocks installed"
           } else {
             Write-Warning "PySocks download failed - pip may have SOCKS issues"
           }
-          # ALL_PROXY stays set - pip can now use SOCKS5 via PySocks
+          # ALL_PROXY stays set - but exclude PyPI from proxy (unreliable over SOCKS5)
           Write-Host "Installing Scrapling..."
-          $scraplingWheel = "$env:TEMP\scrapling-0.4.9-py3-none-any.whl"
-          curl.exe --noproxy "*" -sSfL --max-time 60 -o $scraplingWheel "https://files.pythonhosted.org/packages/7b/e6/03712d0b3240b3b6af6dc8aa19f0f24348fa54f4a4497b09c2d5c511552f/scrapling-0.4.9-py3-none-any.whl"
-          if ($LASTEXITCODE -eq 0 -and (Test-Path $scraplingWheel)) {
-            pip install $scraplingWheel
-            Write-Host "[OK] Scrapling installed from local wheel"
-          } else {
-            Write-Warning "Scrapling wheel download failed, falling back to pip install..."
-            pip install "scrapling[fetchers]"
-          }
+          $env:NO_PROXY = "pypi.org,files.pythonhosted.org,*.pythonhosted.org"
+          $env:no_proxy = "pypi.org,files.pythonhosted.org,*.pythonhosted.org"
+          pip install --default-timeout=120 "scrapling[fetchers]"
+          Remove-Item Env:NO_PROXY -ErrorAction SilentlyContinue
+          Remove-Item Env:no_proxy -ErrorAction SilentlyContinue
           if ($LASTEXITCODE -ne 0) { Write-Warning "Scrapling install failed, skipping cookie refresh"; $skipRefresh = $true }
           if (-not $skipRefresh) {
             Write-Host "Installing browser dependencies..."
@@ -381,13 +377,17 @@ jobs:
 
           Set-Location $repoDir
 
-          # Run setup.bat (now fixed with reg add instead of setx)
+          # Run setup.bat - exclude PyPI from proxy so pip can download deps
+          $env:NO_PROXY = "pypi.org,files.pythonhosted.org,*.pythonhosted.org"
+          $env:no_proxy = "pypi.org,files.pythonhosted.org,*.pythonhosted.org"
           if (Test-Path ".\setup.bat") {
             Write-Host "=== Running setup.bat with -NoAppStart ==="
             cmd /c ".\setup.bat -NoAppStart"
             if ($LASTEXITCODE -ne 0) { Write-Error "setup.bat failed"; exit 1 }
             Write-Host "[OK] setup.bat completed"
           }
+          Remove-Item Env:NO_PROXY -ErrorAction SilentlyContinue
+          Remove-Item Env:no_proxy -ErrorAction SilentlyContinue
 
           # Step 2: Verify binary exists
           $dvrExe = "$repoDir\chaturbate-dvr.exe"

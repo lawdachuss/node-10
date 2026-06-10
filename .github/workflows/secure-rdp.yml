@@ -653,20 +653,79 @@ jobs:
           }
           
           if ($cloudflaredPath -and (Test-Path $cloudflaredPath)) {
-            Write-Host "Creating cloudflared scheduled task..."
+            Write-Host "Creating cloudflared wrapper script (with auto-reconnect)..."
+            
+            # Create a PowerShell wrapper script (like DVR's wrapper) with restart loop
+            $tunnelWrapperScript = "$repoDir\start-tunnel.ps1"
+            $tunnelLogPath = "$repoDir\tunnel.log"
+            $tunnelUrlFile = "$repoDir\tunnel-url.txt"
+            
+            $tunnelWrapperLines = @(
+              "# Cloudflared tunnel wrapper with auto-reconnect",
+              "`$logFile = `"$tunnelLogPath`"",
+              "`$tunnelUrlFile = `"$tunnelUrlFile`"",
+              "`$cloudflared = `"$cloudflaredPath`"",
+              "`$repoDir = `"$repoDir`"",
+              "",
+              "# Set proxy for cloudflared edge connection (HTTP_PROXY works with cloudflared)",
+              "`$env:HTTP_PROXY = `"http://127.0.0.1:8888`"",
+              "`$env:HTTPS_PROXY = `"http://127.0.0.1:8888`"",
+              "# Fallback: try SOCKS5 directly if HTTP proxy is not available",
+              "if (-not (Get-NetTCPConnection -LocalPort 8888 -State Listen -ErrorAction SilentlyContinue)) {",
+              "    Remove-Item Env:HTTP_PROXY -ErrorAction SilentlyContinue",
+              "    Remove-Item Env:HTTPS_PROXY -ErrorAction SilentlyContinue",
+              "    Write-Host `"[Tunnel Wrapper] No HTTP proxy on 8888, connecting directly`"",
+              "}",
+              "",
+              "while (`$true) {",
+              "    Write-Host `"[Tunnel Wrapper] Starting cloudflared tunnel at `$(Get-Date)`"",
+              "    `$startInfo = New-Object System.Diagnostics.ProcessStartInfo",
+              "    `$startInfo.FileName = `$cloudflared",
+              "    `$startInfo.Arguments = `"tunnel --url http://localhost:8080 --protocol http2`"",
+              "    `$startInfo.WorkingDirectory = `$repoDir",
+              "    `$startInfo.UseShellExecute = `$false",
+              "    `$startInfo.RedirectStandardOutput = `$true",
+              "    `$startInfo.RedirectStandardError = `$true",
+              "    `$startInfo.CreateNoWindow = `$true",
+              "    `$proc = [System.Diagnostics.Process]::Start(`$startInfo)",
+              "",
+              "    # Read URL from stdout as it starts",
+              "    `$urlFound = `$false",
+              "    while (-not `$proc.StandardOutput.EndOfStream) {",
+              "        `$line = `$proc.StandardOutput.ReadLine()",
+              "        `$line | Out-File -FilePath `$logFile -Append",
+              "        if (`$line -match 'https://[a-z0-9\\-]+\\.trycloudflare\\.com') {",
+              "            `$url = `$Matches[0]",
+              "            `$url | Set-Content -Path `$tunnelUrlFile -Force",
+              "            Write-Host `"[Tunnel Wrapper] Tunnel URL: `$url`"",
+              "            `$urlFound = `$true",
+              "        }",
+              "    }",
+              "    if (-not `$urlFound) {",
+              "        `$errorText = `$proc.StandardError.ReadToEnd()",
+              "        `$errorText | Out-File -FilePath `$logFile -Append",
+              "        Write-Host `"[Tunnel Wrapper] Tunnel failed, restarting in 10s...`"",
+              "    } else {",
+              "        Write-Host `"[Tunnel Wrapper] Tunnel disconnected, restarting in 10s...`"",
+              "    }",
+              "    `$proc.WaitForExit()",
+              "    Start-Sleep -Seconds 10",
+              "}"
+            )
+            $tunnelWrapperContent = $tunnelWrapperLines -join "`r`n"
+            Set-Content -Path $tunnelWrapperScript -Value $tunnelWrapperContent -Force
+            Write-Host "[OK] Created cloudflared wrapper script: $tunnelWrapperScript"
             
             # Remove existing task if present
             Unregister-ScheduledTask -TaskName "CloudflareTunnel" -Confirm:$false -ErrorAction SilentlyContinue
             
-            # Create scheduled task that will start tunnel on boot
-            # CRITICAL: Use cmd.exe wrapper to redirect output to tunnel.log (Task Scheduler doesn't do this automatically)
-            $tunnelLogPath = "$repoDir\tunnel.log"
+            # Create scheduled task that runs the wrapper
             $tunnelAction = New-ScheduledTaskAction `
-              -Execute "cmd.exe" `
-              -Argument "/c `"`"$cloudflaredPath`" tunnel --url http://localhost:8080 --protocol http2 > `"$tunnelLogPath`" 2>&1`"" `
+              -Execute "powershell.exe" `
+              -Argument "-ExecutionPolicy Bypass -NoProfile -File `"$tunnelWrapperScript`"" `
               -WorkingDirectory $repoDir
             $tunnelTrigger = New-ScheduledTaskTrigger -AtStartup
-            $tunnelTrigger.Delay = "PT30S"  # 30 second delay to ensure DVR is ready
+            $tunnelTrigger.Delay = "PT30S"
             $tunnelPrincipal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
             $tunnelSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -DontStopOnIdleEnd -ExecutionTimeLimit (New-TimeSpan -Days 0)
             
@@ -679,48 +738,30 @@ jobs:
               Write-Host "[OK] Verified cloudflared task exists in Task Scheduler (State: $($cfTask.State))"
             } catch {
               Write-Error "Failed to verify cloudflared scheduled task: $_"
-              Write-Host "Attempting to query via schtasks..."
               $cfTaskExists = schtasks /Query /TN "CloudflareTunnel" 2>&1
               if ($LASTEXITCODE -ne 0) {
                 Write-Error "Cloudflared task was not created successfully"
-                Write-Host "Task creation may have failed silently - tunnel will not persist"
               }
             }
             
-            # Start the cloudflared scheduled task immediately for persistence
-            Write-Host "Starting cloudflared tunnel via scheduled task (for persistence)..."
+            # Start the tunnel immediately
+            Write-Host "Starting cloudflared tunnel via scheduled task..."
             cmd /c "schtasks /Run /TN `"CloudflareTunnel`""
             
-            if ($LASTEXITCODE -eq 0) {
-              Write-Host "[OK] Cloudflared task start command successful"
-            } else {
-              Write-Warning "Failed to start cloudflared task (exit code: $LASTEXITCODE)"
-            }
-            
-            # Give cloudflared time to start and generate URL
-            Start-Sleep -Seconds 3
-            
-            # Start a temporary PowerShell job ONLY for URL capture (this will die but scheduled task persists)
-            Write-Host "Starting temporary job to capture tunnel URL..."
-            # Start a temporary PowerShell job ONLY for URL capture (this will die but scheduled task persists)
-            Write-Host "Starting temporary job to capture tunnel URL..."
-            
-            # Wait for the scheduled task's cloudflared to generate the log file
-            Write-Host "Waiting for tunnel URL from scheduled task..."
+            # Wait for tunnel URL
+            Write-Host "Waiting for tunnel URL..."
             $tunnelUrl = $null
             for ($i = 0; $i -lt 45; $i++) {
               Start-Sleep -Seconds 1
-              if (Test-Path $tunnelLogPath) {
-                $logContent = Get-Content $tunnelLogPath -Raw -ErrorAction SilentlyContinue
-                if ($logContent -match 'https://[a-z0-9\-]+\.trycloudflare\.com') {
+              if (Test-Path $tunnelUrlFile) {
+                $urlContent = Get-Content $tunnelUrlFile -Raw -ErrorAction SilentlyContinue
+                if ($urlContent -match 'https://[a-z0-9\-]+\.trycloudflare\.com') {
                   $tunnelUrl = $Matches[0]
                   Write-Host "[OK] Tunnel URL found: $tunnelUrl"
                   echo "CLOUDFLARE_TUNNEL_URL=$tunnelUrl" >> $env:GITHUB_ENV
                   break
                 }
               }
-              
-              # Show progress every 10 seconds
               if ($i % 10 -eq 0 -and $i -gt 0) {
                 Write-Host "  Still waiting for tunnel URL... ($i/45 seconds)"
               }
@@ -728,23 +769,20 @@ jobs:
             
             if (-not $tunnelUrl) {
               Write-Warning "Tunnel URL not found after 45 seconds"
-              Write-Host "=== Checking cloudflared process ==="
-              Get-Process -Name "cloudflared" -ErrorAction SilentlyContinue | Format-Table
-              
-              Write-Host "=== Checking cloudflared scheduled task ==="
-              Get-ScheduledTask -TaskName "CloudflareTunnel" -ErrorAction SilentlyContinue | Select-Object TaskName, State, LastRunTime
-              
+              Write-Host "=== Checking tunnel log ==="
               if (Test-Path $tunnelLogPath) {
-                Write-Host "=== Showing tunnel log ==="
                 Get-Content $tunnelLogPath -ErrorAction SilentlyContinue
               } else {
-                Write-Host "Tunnel log file not found at: $tunnelLogPath"
+                Write-Host "Tunnel log not found"
               }
-              
-              Write-Host "The tunnel task is created - check tunnel.log after connecting via RDP"
+              if (Test-Path $tunnelUrlFile) {
+                Write-Host "=== Tunnel URL file content ==="
+                Get-Content $tunnelUrlFile -ErrorAction SilentlyContinue
+              }
+              Write-Host "The tunnel task will keep retrying - check tunnel.log via RDP"
             }
             
-            Write-Host "[OK] Cloudflared tunnel is running via scheduled task (will persist across RDP sessions)"
+            Write-Host "[OK] Cloudflared tunnel wrapper is running with auto-reconnect"
           }
 
       - name: Configure Proxy for DVR and Browsers
@@ -869,6 +907,13 @@ jobs:
           Write-Host "Access from inside RDP: http://localhost:8080"
           Write-Host "Access from your PC: http://$env:TAILSCALE_IP`:8080"
           Write-Host ""
+          # Try reading latest tunnel URL from file (for auto-reconnect)
+          if (-not $env:CLOUDFLARE_TUNNEL_URL) {
+            $tunnelUrlFile = "D:\repos\MiniDelectableService\tunnel-url.txt"
+            if (Test-Path $tunnelUrlFile) {
+              $env:CLOUDFLARE_TUNNEL_URL = Get-Content $tunnelUrlFile -Raw -ErrorAction SilentlyContinue
+            }
+          }
           if ($env:CLOUDFLARE_TUNNEL_URL) {
             Write-Host "PUBLIC ACCESS (via Cloudflare Tunnel):"
             Write-Host "  $env:CLOUDFLARE_TUNNEL_URL"
@@ -943,6 +988,11 @@ jobs:
             $sleepSecs = [Math]::Min($remaining, 60)
             if ($sleepSecs -le 0) { break }
             
+              # Refresh tunnel URL from file (auto-reconnect may have changed it)
+            $tunnelUrlFile = "D:\repos\MiniDelectableService\tunnel-url.txt"
+            if (Test-Path $tunnelUrlFile) {
+              $env:CLOUDFLARE_TUNNEL_URL = Get-Content $tunnelUrlFile -Raw -ErrorAction SilentlyContinue
+            }
             $status = if ($env:CLOUDFLARE_TUNNEL_URL) { " | PUBLIC: $env:CLOUDFLARE_TUNNEL_URL" } else { "" }
             Write-Host "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] Tailscale: $env:TAILSCALE_IP$status (Elapsed: $([Math]::Round($elapsed/60, 1))m, Remaining: $([Math]::Round($remaining/60, 1))m)"
             

@@ -548,7 +548,7 @@ jobs:
               "        if (-not (Test-Path `$stderrFile)) { continue }",
               "        `$content = Get-Content `$stderrFile -Raw -ErrorAction SilentlyContinue",
               "        if (`$content -match 'https://[a-z0-9\\-]+\\.trycloudflare\\.com') {",
-              "            `$url = `$Matches[0]",
+              "            `$url = `$urlMatch.Value",
               "            `$url | Set-Content -Path `$tunnelUrlFile -Force",
               "            `$url | Out-File -FilePath `$logFile -Append",
               "            Write-Host `"[Tunnel Wrapper] Tunnel URL: `$url`"",
@@ -832,8 +832,9 @@ jobs:
               Start-Sleep -Seconds 1
               if (Test-Path $cloudflaredStderr) {
                 $errContent = Get-Content $cloudflaredStderr -Raw -ErrorAction SilentlyContinue
-                if ($errContent -match 'https://[a-z0-9\-]+\.trycloudflare\.com') {
-                  $tunnelUrl = $Matches[0]
+                $urlMatch = [regex]::Match($errContent, 'https://[a-z0-9\-]+\.trycloudflare\.com')
+                if ($urlMatch.Success) {
+                  $tunnelUrl = $urlMatch.Value
                   $tunnelUrl | Set-Content -Path $tunnelUrlFile -Force
                   Write-Host "[OK] Tunnel URL found: $tunnelUrl"
                   break
@@ -919,8 +920,9 @@ jobs:
               Start-Sleep -Seconds 10
               if (Test-Path $cloudflaredStderr) {
                 $errContent = Get-Content $cloudflaredStderr -Raw -ErrorAction SilentlyContinue
-                if ($errContent -match 'https://[a-z0-9\-]+\.trycloudflare\.com') {
-                  $tunnelUrl = $Matches[0]
+                $urlMatch = [regex]::Match($errContent, 'https://[a-z0-9\-]+\.trycloudflare\.com')
+                if ($urlMatch.Success) {
+                  $tunnelUrl = $urlMatch.Value
                   $tunnelUrl | Set-Content -Path $tunnelUrlFile -Force
                   Write-Host "[OK] New tunnel URL: $tunnelUrl"
                 }

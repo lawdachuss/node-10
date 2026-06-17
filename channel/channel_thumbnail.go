@@ -15,16 +15,16 @@ import (
 )
 
 const (
-	thumbWidth    = 1280
-	thumbHeight   = 720
-	spriteFrames  = 16
-	spriteCols    = 4
-	spriteRows    = 4
-	spriteFrameW  = 640
-	spriteFrameH  = 360
-	previewFrames = 40
-	previewWidth  = 320
-	previewFPS    = 8
+	thumbWidth        = 1280
+	thumbHeight       = 720
+	spriteFrames      = 16
+	spriteCols        = 4
+	spriteRows        = 4
+	spriteFrameW      = 640
+	spriteFrameH      = 360
+	previewBaseFrames = 40
+	previewWidth      = 320
+	previewFPS        = 8
 )
 
 // generateThumbnail is the channel-scoped wrapper — logs go to the channel log.
@@ -213,8 +213,14 @@ func generateThumbnailForFile(videoPath string, info, errFn func(string, ...inte
 		}
 	}()
 
-	// ── Animated WebP preview (40 frames at 8 fps → 5 s per loop) ─────────
+	// ── Animated WebP preview covering the FULL video duration ──────────────
 	// Each frame is 320px wide. WebP is far smaller than GIF at same quality.
+	// fps is calculated so that the selected frame count is spread evenly across
+	// the entire video.  Longer recordings get more frames for smoother playback:
+	//   <1 min:   40 frames (1 frame per ~1.5s)
+	//   1-10 min: 60 frames
+	//   10-60+min: 80 frames
+	// For short videos (<5 s) fps is capped at previewFPS (8) for smooth playback.
 	// Same 15-minute timeout as the sprite for long videos.
 	go func() {
 		previewCtx, previewCancel := context.WithTimeout(context.Background(), 15*time.Minute)
@@ -223,11 +229,27 @@ func generateThumbnailForFile(videoPath string, info, errFn func(string, ...inte
 		previewWEBP := videoPath + ".preview.webp"
 		defer os.Remove(previewWEBP)
 
-		// fps=previewFPS gives smooth playback.
+		// More frames for longer videos = smoother preview.
+		previewFrames := previewBaseFrames
+		if dur > 60 {
+			previewFrames = 60
+		}
+		if dur > 600 {
+			previewFrames = 80
+		}
+
+		// Spread previewFrames across the full duration.
+		// fps = frames / duration, capped at previewFPS for short videos.
+		previewRate := float64(previewFPS) // cap at 8 fps
+		if dur > 0 {
+			if r := float64(previewFrames) / dur; r < previewRate {
+				previewRate = r // slower fps to cover full duration
+			}
+		}
 		// scale down to previewWidth, lanczos for sharp scaling.
 		vf := fmt.Sprintf(
-			"fps=%d,scale=%d:-1:flags=lanczos",
-			previewFPS,
+			"fps=%.4f,scale=%d:-1:flags=lanczos",
+			previewRate,
 			previewWidth,
 		)
 

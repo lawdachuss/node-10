@@ -10,23 +10,26 @@ import (
 var pixhostSem = make(chan struct{}, 5)
 
 // MultiImageUploader uploads thumbnails/sprites to all configured hosts
-// in parallel. Prefers Pixhost.to, falls back to ImgBB.
+// in parallel. Prefers Pixhost.to, falls back to ImgBB, then Catbox.moe.
 type MultiImageUploader struct {
 	pixhost *ThumbnailUploader
 	imgbb   *ImgBBUploader
+	catbox  *CatboxUploader
 }
 
 // NewMultiImageUploader creates a new image uploader that uploads to
-// Pixhost.to and ImgBB simultaneously.
+// Pixhost.to, ImgBB, and Catbox.moe (fallback order).
 func NewMultiImageUploader() *MultiImageUploader {
 	return &MultiImageUploader{
 		pixhost: NewThumbnailUploader(""),
 		imgbb:   NewImgBBUploader(),
+		catbox:  NewCatboxUploader(),
 	}
 }
 
 // Upload uploads to Pixhost (with retries) and ImgBB in parallel.
-// Returns Pixhost URL on success, ImgBB URL as fallback.
+// Returns Pixhost URL on success, ImgBB URL as first fallback,
+// Catbox.moe as a second sequential fallback.
 func (m *MultiImageUploader) Upload(filePath string) (url, host string, err error) {
 	var (
 		mu         sync.Mutex
@@ -64,10 +67,22 @@ func (m *MultiImageUploader) Upload(filePath string) (url, host string, err erro
 
 	go func() {
 		defer wg.Done()
-		u, err := m.imgbb.Upload(filePath)
+		var lastErr error
+		for attempt := 0; attempt < 3; attempt++ {
+			if attempt > 0 {
+				time.Sleep(time.Duration(1<<attempt) * time.Second)
+			}
+			u, err := m.imgbb.Upload(filePath)
+			if err == nil {
+				mu.Lock()
+				imgbbURL = u
+				mu.Unlock()
+				return
+			}
+			lastErr = err
+		}
 		mu.Lock()
-		imgbbURL = u
-		imgbbErr = err
+		imgbbErr = lastErr
 		mu.Unlock()
 	}()
 
@@ -79,5 +94,13 @@ func (m *MultiImageUploader) Upload(filePath string) (url, host string, err erro
 	if imgbbURL != "" {
 		return imgbbURL, "ImgBB", nil
 	}
-	return "", "", fmt.Errorf("pixhost: %w (imgbb also failed: %v)", pixhostErr, imgbbErr)
+
+	// Both Pixhost and ImgBB failed — try Catbox.moe as a last-resort fallback.
+	// Catbox runs sequentially (not in parallel) to avoid unnecessary uploads.
+	catboxURL, catboxErr := m.catbox.Upload(filePath)
+	if catboxErr == nil {
+		return catboxURL, "Catbox", nil
+	}
+
+	return "", "", fmt.Errorf("pixhost: %w (imgbb also failed: %v, catbox: %v)", pixhostErr, imgbbErr, catboxErr)
 }

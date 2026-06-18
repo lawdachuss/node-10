@@ -22,9 +22,9 @@ const (
 	spriteRows        = 4
 	spriteFrameW      = 640
 	spriteFrameH      = 360
-	previewBaseFrames = 40
 	previewWidth      = 320
-	previewFPS        = 8
+	previewBaseFrames = 40
+	previewFPS        = 24
 )
 
 // generateThumbnail is the channel-scoped wrapper — logs go to the channel log.
@@ -45,8 +45,8 @@ func GenerateThumbnailForFile(videoPath string) (thumbURL, spriteURL, previewURL
 }
 
 // generateThumbnailForFile creates a static thumbnail (JPEG), a multi-frame sprite
-// sheet (JPEG), and an animated GIF preview covering the full video duration.
-// All three are uploaded to remote image hosts and the URLs returned.  Local
+// sheet (JPEG), and an MP4 hover preview (4-second clip).
+// All three are uploaded to remote hosts and the URLs returned.  Local
 // temp files are always cleaned up.
 //
 // JPEG is used for thumbnail and sprite because:
@@ -54,13 +54,16 @@ func GenerateThumbnailForFile(videoPath string) (thumbURL, spriteURL, previewURL
 //   - mjpeg encoder is fast (minimal encoding lag)
 //   - Small filesize with good visual quality
 //
-// GIF is used for the animated preview because Pixhost (the primary image host)
-// does not support WebP.  GIF works on all three image hosts.
+// MP4 is used for the animated preview because:
+//   - ~90% smaller than GIF at same quality
+//   - Full 24-bit color (no 256-color palette limit)
+//   - Smooth 24fps playback (GIF was variable ~1-8fps)
+//   - Catbox accepts MP4 files (free, permanent, CDN-backed)
 //
 // Thumbnail, sprite, and preview run in parallel with independent timeouts:
 //   - thumbnail: 5 min  (single-frame seek)
 //   - sprite:    15 min (seeks through full video for long recordings)
-//   - preview:   15 min (same seeks as sprite)
+//   - preview:   15 min (timelapse across full video, H.264 encode)
 //
 // Using separate contexts prevents one task from being killed prematurely
 // when a long video causes another to exceed a shared short timeout.
@@ -233,17 +236,21 @@ func generateThumbnailForFile(videoPath string, info, errFn func(string, ...inte
 		}
 	}()
 
-	// ── Animated GIF preview covering the FULL video duration ──────────────
-	// GIF is chosen over WebP because Pixhost (the primary image host) does
-	// not support WebP.  GIF works on all three image hosts (Pixhost, ImgBB,
-	// Catbox), avoiding the fallback-chain failures that plagued WebP uploads.
+	// ── MP4 hover preview (timelapse across the full video) ───────────────
+	// H.264 MP4 is used instead of GIF because:
+	//   - ~90% smaller file size for the same visual quality
+	//   - Full 24-bit color (vs 256-color palette in GIF)
+	//   - Smooth 24fps playback (GIF was limited to ~8fps variable rate)
+	//   - Catbox accepts MP4 files (200MB limit, permanent storage)
 	//
-	// Frames are spread evenly across the video.  Longer recordings get more
-	// frames for smoother playback:
-	//   <1 min:   40 frames
-	//   1-10 min: 60 frames
-	//   10-60+min: 80 frames
-	// Same 15-minute timeout as the sprite for long videos.
+	// Frames are sampled evenly across the entire video and played back at
+	// 24fps, creating a fast-paced timelapse that shows the full recording:
+	//   <1 min:    40 frames × 1/24 s = 1.67 s preview
+	//   1-10 min:  60 frames × 1/24 s = 2.50 s preview
+	//   10-60+min: 80 frames × 1/24 s = 3.33 s preview
+	//
+	// Uploaded directly to Catbox.moe (free, permanent, CDN-backed) instead
+	// of the image-only Pixhost/ImgBB fallback chain.
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -254,8 +261,8 @@ func generateThumbnailForFile(videoPath string, info, errFn func(string, ...inte
 		previewCtx, previewCancel := context.WithTimeout(context.Background(), 15*time.Minute)
 		defer previewCancel()
 
-		previewGIF := videoPath + ".preview.gif"
-		defer os.Remove(previewGIF)
+		previewMP4 := videoPath + ".preview.mp4"
+		defer os.Remove(previewMP4)
 
 		previewFrames := previewBaseFrames
 		if dur > 60 {
@@ -265,27 +272,24 @@ func generateThumbnailForFile(videoPath string, info, errFn func(string, ...inte
 			previewFrames = 80
 		}
 
-		previewRate := float64(previewFPS)
-		if dur > 0 {
-			if r := float64(previewFrames) / dur; r < previewRate {
-				previewRate = r
-			}
+		interval := dur / float64(previewFrames)
+		if interval < 0.1 {
+			interval = 0.1
 		}
-
-		gifVF := fmt.Sprintf(
-			"fps=%.4f,scale=%d:-1:flags=lanczos,split[s0][s1];[s0]palettegen=max_colors=256[p];[s1][p]paletteuse",
-			previewRate,
-			previewWidth,
-		)
 
 		config.AcquireFFmpeg()
 		err := config.FFmpegCommandContext(previewCtx,
 			"-y",
 			"-i", videoPath,
-			"-vf", gifVF,
-			"-frames:v", strconv.Itoa(previewFrames),
-			"-loop", "0",
-			previewGIF,
+			"-vf", fmt.Sprintf("fps=1/%f,scale=%d:-2:flags=lanczos,setpts=N/%d/TB",
+				interval, previewWidth, previewFPS),
+			"-r", strconv.Itoa(previewFPS),
+			"-c:v", "libx264",
+			"-preset", "fast",
+			"-crf", "23",
+			"-movflags", "+faststart",
+			"-an",
+			previewMP4,
 		).Run()
 		config.ReleaseFFmpeg()
 
@@ -295,8 +299,8 @@ func generateThumbnailForFile(videoPath string, info, errFn func(string, ...inte
 			return
 		}
 
-		imgUploader := uploader.NewMultiImageUploader()
-		if remoteURL, _, uploadErr := imgUploader.Upload(previewGIF); uploadErr == nil {
+		catboxUploader := uploader.NewCatboxUploader()
+		if remoteURL, uploadErr := catboxUploader.Upload(previewMP4); uploadErr == nil {
 			info("preview: ✓ %s", baseName)
 			previewDone <- remoteURL
 		} else {

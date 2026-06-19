@@ -225,6 +225,7 @@ CREATE TABLE IF NOT EXISTS pipeline_states (
     preview_url TEXT DEFAULT '',
     embed_url TEXT DEFAULT '',
     links TEXT DEFAULT '{}',
+    retries INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );

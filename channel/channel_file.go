@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -894,23 +895,38 @@ func normalizeFMP4Timestamps(videoPath string) (string, error) {
 	return videoPath, nil
 }
 
+// dateSeparatorRe matches the "_YYYY-MM-DD_" / "_YYYY-MM-DD-" timestamp separator
+// the recorder writes between the username and the time portion.  Anchoring on
+// the full date (not just "_20") is what keeps usernames that themselves contain
+// "_20" (e.g. "alice_20_fan_2025-01-01_...") from being mis-split: the regex
+// skips the "_20" inside the username and lands on the real date.
+var dateSeparatorRe = regexp.MustCompile(`_(20\d{2}-\d{2}-\d{2})[_-]`)
+
+// findDateSeparatorIndex returns the byte index in stem of the "_" that begins
+// the "_YYYY-MM-DD_" timestamp separator, or -1 if no date separator is found.
+// Both extractUsernameFromFilename and extractTimestampFromFilename use it so
+// they always agree on where the username ends.
+func findDateSeparatorIndex(stem string) int {
+	loc := dateSeparatorRe.FindStringSubmatchIndex(stem)
+	if loc == nil {
+		return -1
+	}
+	return loc[0] // index of the leading "_"
+}
+
 // extractUsernameFromFilename parses "username_YYYY-MM-DD_HH-MM-SS.ext" to get the username.
-// Uses a tighter pattern: looks for "_20" followed immediately by two digits, a hyphen, two digits,
-// a hyphen, and two digits (i.e. the date portion YYYY-MM-DD).  This avoids false matches when
-// a username itself contains "_20" (e.g. "alice_20_fan_2025-01-01...").
+// It locates the "_YYYY-MM-DD_" timestamp separator (not merely the substring
+// "_20", which can legitimately appear inside a username such as
+// "alice_20_fan_2025-01-01_...") so the username portion is split correctly.
 func extractUsernameFromFilename(filename string) string {
 	base := strings.TrimSuffix(filename, filepath.Ext(filename))
 
 	// Strip "merged-" prefix that the merge system prepends.
 	stem := strings.TrimPrefix(base, "merged-")
 
-	// Find the timestamp separator (_YYYY-MM-DD_ or _YYYY-MM-DD-)
-	idx := strings.Index(stem, "_20")
+	// Find the real timestamp separator (_YYYY-MM-DD_ or _YYYY-MM-DD-).
+	idx := findDateSeparatorIndex(stem)
 	if idx < 0 {
-		return ""
-	}
-	rest := stem[idx+1:]
-	if len(rest) < 10 || rest[4] != '-' || rest[7] != '-' {
 		return ""
 	}
 
@@ -942,11 +958,13 @@ func extractUsernameFromFilename(filename string) string {
 // format ("2025-01-01T12:00:00Z").  Returns "" if the pattern is not found.
 func extractTimestampFromFilename(filename string) string {
 	base := strings.TrimSuffix(filename, filepath.Ext(filename))
-	if idx := strings.Index(base, "_20"); idx > 0 {
-		ts := base[idx+1:]
-		if len(ts) >= 19 && ts[4] == '-' && ts[7] == '-' && ts[10] == '_' && ts[13] == '-' && ts[16] == '-' {
-			return ts[:10] + "T" + ts[11:13] + ":" + ts[14:16] + ":" + ts[17:19] + "Z"
-		}
+	idx := findDateSeparatorIndex(base)
+	if idx < 0 {
+		return ""
+	}
+	ts := base[idx+1:] // "YYYY-MM-DD_HH-MM-SS..."
+	if len(ts) >= 19 && ts[4] == '-' && ts[7] == '-' && ts[10] == '_' && ts[13] == '-' && ts[16] == '-' {
+		return ts[:10] + "T" + ts[11:13] + ":" + ts[14:16] + ":" + ts[17:19] + "Z"
 	}
 	return ""
 }
@@ -995,23 +1013,28 @@ func IsAlreadyFullyUploaded(filePath string) bool {
 
 // configuredUploadHosts returns the list of upload hosts that have their
 // API keys configured in the server config.
+//
+// This delegates to uploader.NewMultiHostUploader(...).AvailableHosts() so that
+// the set of hosts checked by IsAlreadyFullyUploaded is always identical to the
+// set the pipeline actually uploads to.  Previously this maintained a separate
+// hand-written list that drifted out of sync (it omitted SeekStreaming), which
+// caused the watcher to consider a file "fully uploaded" — and delete the local
+// copy — before SeekStreaming had received it.
 func configuredUploadHosts() []string {
 	cfg := server.Config
 	if cfg == nil {
 		return nil
 	}
-	var hosts []string
-	hosts = append(hosts, "GoFile")
-	if cfg.VoeSXAPIKey != "" {
-		hosts = append(hosts, "VOE.sx")
-	}
-	if cfg.StreamtapeLogin != "" && cfg.StreamtapeKey != "" {
-		hosts = append(hosts, "Streamtape")
-	}
-	if cfg.MixdropEmail != "" && cfg.MixdropToken != "" {
-		hosts = append(hosts, "Mixdrop")
-	}
-	return hosts
+	upl := uploader.NewMultiHostUploader(
+		cfg.VoeSXAPIKey,
+		cfg.StreamtapeLogin,
+		cfg.StreamtapeKey,
+		cfg.MixdropEmail,
+		cfg.MixdropToken,
+		cfg.SeekStreamingKey,
+		nil,
+	)
+	return upl.AvailableHosts()
 }
 
 // UploadOrphanedFile uploads a file to all configured hosts and saves metadata

@@ -285,6 +285,21 @@ func generateThumbnailForFile(videoPath string, info, errFn func(string, ...inte
 			}
 		}()
 
+		// waitForPreviewFile polls with backoff until the preview file is
+		// confirmed to exist.  On Windows, an AV scanner (Defender, etc.) can
+		// briefly hold an exclusive lock on a newly-created file, causing
+		// os.Stat to return ERROR_FILE_NOT_FOUND even though ffmpeg exited
+		// successfully.  Retrying with a short delay resolves this.
+		waitForPreviewFile := func() bool {
+			for delay := 0; delay < 5; delay++ {
+				if fileExists(previewMP4) {
+					return true
+				}
+				time.Sleep(time.Duration(50*(1<<delay)) * time.Millisecond) // 50, 100, 200, 400, 800 ms
+			}
+			return false
+		}
+
 		config.AcquireFFmpeg()
 		defer config.ReleaseFFmpeg()
 
@@ -385,7 +400,7 @@ func generateThumbnailForFile(videoPath string, info, errFn func(string, ...inte
 			return
 		}
 
-		if !fileExists(previewMP4) {
+		if !waitForPreviewFile() {
 			errFn("preview: ffmpeg exited successfully but produced no output file for %s", baseName)
 			previewDone <- ""
 			return

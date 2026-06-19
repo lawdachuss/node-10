@@ -691,6 +691,7 @@ type PipelineState struct {
 	PreviewURL   string `json:"preview_url,omitempty"`
 	EmbedURL     string `json:"embed_url,omitempty"`
 	LinksJSON    string `json:"links,omitempty"` // JSON-encoded map[string]string
+	Retries      int    `json:"retries,omitempty"`
 	CreatedAt    string `json:"created_at,omitempty"`
 	UpdatedAt    string `json:"updated_at,omitempty"`
 }

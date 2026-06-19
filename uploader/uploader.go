@@ -119,6 +119,11 @@ type uploaderFunc func(string, ProgressFunc) (string, error)
 
 func (m *MultiHostUploader) initHosts() {
 	m.hostInitOnce.Do(func() {
+		// Don't clobber a hosts map that was pre-populated (e.g. by tests that
+		// inject fakes).  Only build the default host set when none was provided.
+		if m.hosts != nil {
+			return
+		}
 		m.hosts = map[string]uploaderFunc{}
 		m.hosts["GoFile"] = m.gofile.UploadWithProgress
 		if m.voesx != nil && m.voesx.apiKey != "" {

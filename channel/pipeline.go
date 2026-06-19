@@ -34,6 +34,10 @@ var stageNames = map[Stage]string{
 
 func (s Stage) String() string { return stageNames[s] }
 
+// maxPipelineRetries is the number of times a failed pipeline will be retried
+// across restarts before it is abandoned and its state row is deleted.
+const maxPipelineRetries = 5
+
 func stageFromString(s string) Stage {
 	for k, v := range stageNames {
 		if v == s {
@@ -56,6 +60,7 @@ type Pipeline struct {
 	CurrentStage Stage  `json:"current_stage"`
 	Failed       bool   `json:"failed"`
 	LastError    string `json:"last_error"`
+	Retries      int    `json:"retries"`
 
 	// Channel metadata snapshot captured at enqueue time so stageSaveMetadata
 	// uses the state from when the file was recorded, not whatever a newer
@@ -108,6 +113,7 @@ func (p *Pipeline) toDBState() *database.PipelineState {
 		CurrentStage: p.CurrentStage.String(),
 		Failed:       p.Failed,
 		LastError:    p.LastError,
+		Retries:      p.Retries,
 		ThumbURL:     p.ThumbURL,
 		SpriteURL:    p.SpriteURL,
 		PreviewURL:   p.PreviewURL,
@@ -127,6 +133,7 @@ func pipelineFromDBState(s *database.PipelineState) *Pipeline {
 		CurrentStage: stageFromString(s.CurrentStage),
 		Failed:       s.Failed,
 		LastError:    s.LastError,
+		Retries:      s.Retries,
 		ThumbURL:     s.ThumbURL,
 		SpriteURL:    s.SpriteURL,
 		PreviewURL:   s.PreviewURL,
@@ -542,9 +549,20 @@ func NewPipelineQueue(ch *Channel) *PipelineQueue {
 	return pq
 }
 
-// startOnce launches the worker goroutine on first use.
+// startOnce launches the worker goroutine on first use, and relaunches it if
+// the queue was previously Stop()ed.  This keeps the queue reusable across
+// stop/start cycles instead of leaving it permanently dead after the first
+// Stop() — a latent footgun where later EnqueueFile calls would silently
+// append pipelines that nothing ever processed.
 func (pq *PipelineQueue) startOnce() {
 	pq.mu.Lock()
+	// If the worker was previously stopped, reset so we can launch a fresh one.
+	// wg.Wait() in Stop() guarantees the old goroutine has exited by now, so
+	// there is no double-launch risk.
+	if pq.started && pq.stopped {
+		pq.started = false
+		pq.stopped = false
+	}
 	if !pq.started {
 		pq.started = true
 		pq.mu.Unlock()
@@ -652,20 +670,27 @@ func (pq *PipelineQueue) processPipeline(p *Pipeline) {
 				Error:    p.LastError,
 			})
 		}
-		if p.CurrentStage == StageDone || p.Failed {
-			if p.CurrentStage == StageDone {
-				if delErr := server.DeletePipelineState(p.FileHash); delErr != nil {
-					ch.Warn("pipeline: could not delete state for %s: %v", filename, delErr)
+			if p.CurrentStage == StageDone || p.Failed {
+				if p.CurrentStage == StageDone {
+					if delErr := server.DeletePipelineState(p.FileHash); delErr != nil {
+						ch.Warn("pipeline: could not delete state for %s: %v", filename, delErr)
+					}
+				} else if p.Retries < maxPipelineRetries {
+					p.Retries++
+					if saveErr := server.SavePipelineState(p.toDBState()); saveErr != nil {
+						ch.Warn("pipeline: could not persist state for %s: %v", filename, saveErr)
+					}
+				} else {
+					// Retries exhausted — abandon the pipeline and clean up.
+					ch.Error("pipeline: %s failed %d times, abandoning", filename, p.Retries+1)
+					if delErr := server.DeletePipelineState(p.FileHash); delErr != nil {
+						ch.Warn("pipeline: could not delete abandoned state for %s: %v", filename, delErr)
+					}
 				}
-			} else {
-				if saveErr := server.SavePipelineState(p.toDBState()); saveErr != nil {
-					ch.Warn("pipeline: could not persist state for %s: %v", filename, saveErr)
+				if m := server.Manager; m != nil {
+					m.PublishLog(ch.Config.Username, fmt.Sprintf("[pipeline] %s finished (stage=%s, failed=%v, retries=%d)", filename, p.CurrentStage, p.Failed, p.Retries))
 				}
 			}
-			if m := server.Manager; m != nil {
-				m.PublishLog(ch.Config.Username, fmt.Sprintf("[pipeline] %s finished (stage=%s, failed=%v)", filename, p.CurrentStage, p.Failed))
-			}
-		}
 	}()
 
 	defer func() {
@@ -776,6 +801,20 @@ func (pq *PipelineQueue) processPipeline(p *Pipeline) {
 	ch.SetUploadProgress("", "", 0, 0, 0, 0, 0, "", nil)
 }
 
+// containsHash returns true if a pipeline with the given file hash is already
+// waiting in the queue.  Caller must hold pq.mu.
+func (pq *PipelineQueue) containsHash(fileHash string) bool {
+	if fileHash == "" {
+		return false
+	}
+	for _, p := range pq.pipelines {
+		if p.FileHash == fileHash {
+			return true
+		}
+	}
+	return false
+}
+
 // EnqueueFile creates a pipeline for a finalized video file and adds it to the queue.
 func (pq *PipelineQueue) EnqueueFile(filePath string) {
 	base := filepath.Base(filePath)
@@ -814,6 +853,14 @@ func (pq *PipelineQueue) EnqueueFile(filePath string) {
 			pq.ch.Warn("pipeline: could not save recovery state for %s: %v", base, saveErr)
 		}
 		MarkUploadDone(filePath)
+		return
+	}
+	// Dedup: a pipeline for this exact file is already queued.  Drop the
+	// duplicate so two pipelines can't race on the same upload journal.
+	if pq.containsHash(fileHash) {
+		pq.mu.Unlock()
+		MarkUploadDone(filePath)
+		pq.ch.Warn("pipeline: %s already queued (hash=%s), skipping duplicate", base, fileHash)
 		return
 	}
 
@@ -906,11 +953,26 @@ func (pq *PipelineQueue) ResumePending() {
 			}
 			continue
 		}
+		// Skip pipelines that have exhausted their retry budget.
+		if s.Retries >= maxPipelineRetries {
+			pq.ch.Warn("pipeline: skipping %s — %d retries exhausted (last error: %s)",
+				s.Filename, s.Retries, s.LastError)
+			if delErr := server.DeletePipelineState(s.FileHash); delErr != nil {
+				pq.ch.Warn("pipeline: could not delete exhausted state for %s: %v", s.Filename, delErr)
+			}
+			continue
+		}
+		// Dedup: skip if a pipeline for this hash is already queued (e.g.
+		// ResumePending called twice, or the file was re-enqueued manually).
+		pq.mu.Lock()
+		if pq.containsHash(s.FileHash) {
+			pq.mu.Unlock()
+			continue
+		}
 		p := pipelineFromDBState(&s)
 		MarkUploadInFlight(s.FilePath)
 		pq.ch.UploadWg.Add(1)
-		pq.ch.Info("pipeline: resuming %s at stage %s", s.Filename, s.CurrentStage)
-		pq.mu.Lock()
+		pq.ch.Info("pipeline: resuming %s at stage %s (retry %d)", s.Filename, s.CurrentStage, s.Retries)
 		pq.pipelines = append(pq.pipelines, p)
 		pq.mu.Unlock()
 		pq.cond.Signal()

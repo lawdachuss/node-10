@@ -51,6 +51,18 @@ func (u *SeekStreamingUploader) Upload(filePath string) (string, error) {
 	return u.UploadWithProgress(filePath, nil)
 }
 
+// isUploadPayloadTooLarge returns true if the error indicates the upload was
+// rejected because the file exceeds the server's size limit (HTTP 413).
+// Unlike transient errors (502, 503), a 413 will not resolve on retry because
+// the file size does not change between attempts.
+func isUploadPayloadTooLarge(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "status 413") ||
+		strings.Contains(err.Error(), "413 Payload Too Large")
+}
+
 func (u *SeekStreamingUploader) UploadWithProgress(filePath string, progress ProgressFunc) (string, error) {
 	seekStreamingSem <- struct{}{}
 	defer func() { <-seekStreamingSem }()
@@ -74,6 +86,10 @@ func (u *SeekStreamingUploader) UploadWithProgress(filePath string, progress Pro
 				lastErr = nil
 				continue
 			}
+			// 413 from createTUSUpload is also fatal (Upload-Length header too large)
+			if isUploadPayloadTooLarge(err) {
+				return "", lastErr
+			}
 			if attempt < 3 {
 				continue
 			}
@@ -87,6 +103,10 @@ func (u *SeekStreamingUploader) UploadWithProgress(filePath string, progress Pro
 				time.Sleep(uploadBackoff(attempt, err))
 				lastErr = nil
 				continue
+			}
+			// 413 Payload Too Large is not retryable — the file didn't shrink.
+			if isUploadPayloadTooLarge(err) {
+				return "", lastErr
 			}
 			if attempt < 3 {
 				continue

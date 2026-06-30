@@ -1,4 +1,4 @@
-﻿name: Secure RDP
+name: Secure RDP
 
 on:
   schedule:
@@ -511,8 +511,11 @@ jobs:
           $env:GOFLAGS = "-mod=mod"
           Write-Host "Building cookie grabber..."
           Write-Host "  Go env: $(go env GOPROXY GONOSUMDB GONOSUMCHECK GOFLAGS)"
+          $oldEAP = $ErrorActionPreference
+          $ErrorActionPreference = 'Continue'
           $buildOut = go build -o grab-cookies.exe ./cmd/grab_cookies 2>&1
           $buildExit = $LASTEXITCODE
+          $ErrorActionPreference = $oldEAP
           # Restore proxy env vars after build
           if ($savedAllProxy) { $env:ALL_PROXY = $savedAllProxy; $env:all_proxy = $savedAllProxy }
           if ($savedHttpProxy) { $env:HTTP_PROXY = $savedHttpProxy }
@@ -533,8 +536,11 @@ jobs:
           # and writes them to .env.
           Write-Host "Running cookie grabber through proxy..."
           Write-Host "  PROXY_URL=$env:PROXY_URL"
+          $oldEAP = $ErrorActionPreference
+          $ErrorActionPreference = 'Continue'
           .\grab-cookies.exe 2>&1
           $grabExit = $LASTEXITCODE
+          $ErrorActionPreference = $oldEAP
 
           Remove-Item .\grab-cookies.exe -Force -ErrorAction SilentlyContinue
 

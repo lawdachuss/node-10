@@ -1,4 +1,4 @@
-name: Secure RDP
+﻿name: Secure RDP
 
 on:
   schedule:
@@ -92,7 +92,7 @@ jobs:
             } catch { return @() }
           }
 
-          # ── If a PROXY_URLS secret is set, use it directly and skip discovery ──
+          # -- If a PROXY_URLS secret is set, use it directly and skip discovery --
           $secretProxy = "${{ secrets.PROXY_URLS }}"
           if (-not [string]::IsNullOrWhiteSpace($secretProxy)) {
             log "=== Using pre-configured PROXY_URLS secret ==="
@@ -152,7 +152,7 @@ jobs:
 
           log ""
           log "=== Phase 1: Liveness test (batches of 10, 30s timeout per batch) ==="
-          # Only check if proxy is alive (returns an IP) — fast, parallel
+          # Only check if proxy is alive (returns an IP) -- fast, parallel
           # The critical fix: Wait-Job -Timeout 30 (was 5, which killed jobs before curl could finish)
           $aliveTestBlock = {
             param($proxyUrl)
@@ -193,7 +193,7 @@ jobs:
             $faceId      = ($cbFinalUrl -match '(?i)(verify|auth|captcha|face|human|robot)')
             $cbOk        = ($cbCode -eq "200")
 
-            # Geo-lookup directly (no extra proxy hop needed — IP is already known)
+            # Geo-lookup directly (no extra proxy hop needed -- IP is already known)
             $country = ""; $org = ""
             try {
               $locRaw = curl.exe -s --connect-timeout 3 -m 5 "http://ip-api.com/json/$($w.ip)?fields=countryCode,org" 2>$null
@@ -211,7 +211,7 @@ jobs:
           }
           log "  Clean: $($cleanProxies.Count), Face-ID blocked: $($blockedProxies.Count)"
 
-          # ── Pick best proxies (prefer NL/IN/DE, then any) ──────────────────
+          # -- Pick best proxies (prefer NL/IN/DE, then any) ------------------
           $preferredCountries = @("NL","IN","DE")
           $workingProxies = @()
 
@@ -242,7 +242,7 @@ jobs:
             Write-Error "No working SOCKS5 proxy found after testing all sources."
             log ""
             log "TROUBLESHOOTING:"
-            log "1. GitHub Actions runners are in US/VA — Chaturbate often requires NL or IN IP"
+            log "1. GitHub Actions runners are in US/VA -- Chaturbate often requires NL or IN IP"
             log "2. Free proxy lists rotate rapidly; most are dead within hours"
             log "3. FIX: Set a PROXY_URLS secret with your own working SOCKS5 proxy:"
             log "   e.g. PROXY_URLS=socks5://user:pass@your-proxy.com:1080"

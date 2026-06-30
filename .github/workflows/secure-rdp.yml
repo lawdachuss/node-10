@@ -554,7 +554,7 @@ jobs:
 
           # Verify cookies were written
           $envContent = Get-Content $envPath -Raw -ErrorAction SilentlyContinue
-          if ($envContent -match '^COOKIES=') {
+          if ($envContent -match '(?m)^COOKIES=') {
             Write-Host "[OK] Cookies written to .env"
           } else {
             Write-Warning "COOKIES not found in .env after grabber - falling back"

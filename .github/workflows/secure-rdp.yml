@@ -277,12 +277,26 @@ jobs:
       - name: Install FFmpeg
         shell: powershell
         run: |
+          # Bypass SOCKS5 proxy for Chocolatey - it needs direct HTTPS access
+          $savedAllProxy = $env:ALL_PROXY
+          $savedHttpProxy = $env:HTTP_PROXY
+          $savedHttpsProxy = $env:HTTPS_PROXY
+          Remove-Item Env:ALL_PROXY -ErrorAction SilentlyContinue
+          Remove-Item Env:all_proxy -ErrorAction SilentlyContinue
+          Remove-Item Env:HTTP_PROXY -ErrorAction SilentlyContinue
+          Remove-Item Env:HTTPS_PROXY -ErrorAction SilentlyContinue
+          Remove-Item Env:http_proxy -ErrorAction SilentlyContinue
+          Remove-Item Env:https_proxy -ErrorAction SilentlyContinue
+          $env:NO_PROXY = "community.chocolatey.org,chocolatey.org"
           Write-Host "Installing FFmpeg via Chocolatey..."
           choco install ffmpeg -y --no-progress
           Write-Host "[OK] FFmpeg installed"
           refreshenv
           $ffver = & ffmpeg.exe -version 2>&1
           Write-Host "Version: $($ffver | Select-Object -First 1)"
+          if ($savedAllProxy) { $env:ALL_PROXY = $savedAllProxy; $env:all_proxy = $savedAllProxy }
+          if ($savedHttpProxy) { $env:HTTP_PROXY = $savedHttpProxy }
+          if ($savedHttpsProxy) { $env:HTTPS_PROXY = $savedHttpsProxy }
 
       - name: Check Tailscale Auth Key
         shell: powershell

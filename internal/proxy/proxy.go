@@ -73,13 +73,13 @@ func FetchProxies(ctx context.Context, limit int) ([]ProxyResult, error) {
 			break
 		}
 		wg.Add(1)
-		sem <- struct{}{}
 
 		go func(proxyURL string) {
 			defer wg.Done()
+			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			if found.Load() >= int32(needed) {
+			if found.Load() >= int32(needed) || ctx.Err() != nil {
 				return
 			}
 
@@ -89,7 +89,7 @@ func FetchProxies(ctx context.Context, limit int) ([]ProxyResult, error) {
 			}
 
 			resultsMu.Lock()
-			if found.Load() < int32(needed) {
+			if found.Load() < int32(needed) && ctx.Err() == nil {
 				results = append(results, r)
 				n := found.Add(1)
 				fmt.Printf("[proxy] found %d/%d: %s [%s]\n", n, needed, proxyURL, r.Country)
@@ -252,7 +252,15 @@ func lookupCountry(ip string) string {
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
-	return strings.TrimSpace(string(body))
+	// response is like {"countryCode":"NL"}
+	s := strings.TrimSpace(string(body))
+	if idx := strings.Index(s, `":"`); idx > 0 {
+		s = s[idx+3:]
+		if idx2 := strings.Index(s, `"`); idx2 > 0 {
+			s = s[:idx2]
+		}
+	}
+	return s
 }
 
 func sortProxies(proxies []ProxyResult) []ProxyResult {

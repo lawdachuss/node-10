@@ -34,20 +34,26 @@ func main() {
 	fmt.Printf("Existing cookies: %d chars\n", len(oldCookieStr))
 	fmt.Println()
 
-	// Dynamically fetch and test proxies using httpcloak
-	fmt.Println("Fetching SOCKS5 proxies from public lists...")
-	ctx := context.Background()
-	proxies, err := proxy.FetchProxies(ctx, 5)
-	if err != nil || len(proxies) == 0 {
-		fmt.Printf("  [WARN] No dynamic proxies found: %v\n", err)
-		fmt.Println("  Falling back to env PROXY_URL if set...")
-		// Fallback: try env-based proxies
-		envProxies := getProxyURLs()
+	// Use env PROXY_URL first (already tested by workflow), fall back to dynamic fetch
+	envProxies := getProxyURLs()
+	var proxies []proxy.ProxyResult
+	if len(envProxies) > 0 {
+		fmt.Printf("Using %d proxies from PROXY_URL\n", len(envProxies))
 		for _, p := range envProxies {
 			proxies = append(proxies, proxy.ProxyResult{URL: p, OK: true})
 		}
+	} else {
+		fmt.Println("Fetching SOCKS5 proxies from public lists...")
+		ctx := context.Background()
+		var err error
+		proxies, err = proxy.FetchProxies(ctx, 5)
+		if err != nil {
+			fmt.Printf("  [FAIL] No dynamic proxies found: %v\n", err)
+			exitCode = 1
+			return
+		}
+		fmt.Printf("Using %d dynamically discovered proxies\n", len(proxies))
 	}
-	fmt.Printf("Using %d proxies\n", len(proxies))
 	for i, p := range proxies {
 		fmt.Printf("  [%d] %s [%s]\n", i+1, p.URL, p.Country)
 	}

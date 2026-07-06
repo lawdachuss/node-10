@@ -697,6 +697,9 @@ jobs:
             "`$env:NODE_ID = `"${{ secrets.NODE_ID }}`"",
             "# Session duration controls how long the DVR records before uploading and cycling",
             "`$env:SESSION_DURATION = `"${{ secrets.SESSION_DURATION }}`"",
+            "# Upload host API keys",
+            "`$env:VIDHIDE_API_KEY = `"${{ secrets.VIDHIDE_API_KEY }}`"",
+            "`$env:STREAMWISH_API_KEY = `"${{ secrets.STREAMWISH_API_KEY }}`"",
             "`$env:USER_AGENT = `"$env:USER_AGENT`"",
             "# Disable HTTP_PROXY/HTTPS_PROXY for Go's default transport",
             "# to prevent Go from trying to use SOCKS5 as HTTP proxy.",
@@ -1049,6 +1052,9 @@ jobs:
           
           # Pass SESSION_DURATION to DVR so it uses the configured session length
           $env:SESSION_DURATION = "${{ secrets.SESSION_DURATION }}"
+          # Upload host API keys
+          $env:VIDHIDE_API_KEY = "${{ secrets.VIDHIDE_API_KEY }}"
+          $env:STREAMWISH_API_KEY = "${{ secrets.STREAMWISH_API_KEY }}"
           $dvrProcess = Start-Process -FilePath $dvrExe -ArgumentList "--no-tunnel --output-dir `"$videosDir`"" -WorkingDirectory $repoDir -NoNewWindow -RedirectStandardOutput $dvrLog -RedirectStandardError "$repoDir\dvr-err.log" -PassThru
           Write-Host "[OK] DVR PID: $($dvrProcess.Id)"
           

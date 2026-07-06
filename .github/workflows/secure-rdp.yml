@@ -485,16 +485,10 @@ jobs:
             Write-Warning "MINI_ENV secret is empty - cookie grabber may have no base config"
           }
 
-          # Clear COOKIES from .env so the grabber starts fresh (no old cookies)
-          # This forces Cloudflare to issue a new cf_clearance if the proxy IP is clean.
+          # Keep existing COOKIES in .env so the grabber can merge old cf_clearance
+          # with fresh __cf_bm.  If we cleared them and the proxy can't solve the
+          # Cloudflare challenge, the DVR would lose cf_clearance entirely.
           $envPath = "$repoDir\.env"
-          if (Test-Path $envPath) {
-            $lines = Get-Content $envPath
-            $newLines = $lines | Where-Object { $_ -notmatch '^COOKIES=' }
-            $newContent = $newLines -join "`r`n"
-            [System.IO.File]::WriteAllText($envPath, $newContent, (New-Object System.Text.UTF8Encoding($false)))
-            Write-Host "[OK] Cleared COOKIES from .env - grabbing fresh"
-          }
 
           Set-Location $repoDir
 

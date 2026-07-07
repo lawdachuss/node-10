@@ -1,6 +1,7 @@
 package uploader
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -19,6 +20,28 @@ import (
 	"golang.org/x/net/proxy"
 )
 
+// dialWithTuning returns a DialContext function that:
+// - Disables Nagle's algorithm (TCP_NODELAY) for immediate sends
+// - Sets larger socket send/receive buffers for higher throughput
+func dialWithTuning(timeout time.Duration) func(ctx context.Context, network, addr string) (net.Conn, error) {
+	dialer := &net.Dialer{
+		Timeout:   timeout,
+		KeepAlive: 30 * time.Second,
+	}
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		conn, err := dialer.DialContext(ctx, network, addr)
+		if err != nil {
+			return nil, err
+		}
+		if tcp, ok := conn.(*net.TCPConn); ok {
+			tcp.SetNoDelay(true)
+			tcp.SetWriteBuffer(262144)
+			tcp.SetReadBuffer(262144)
+		}
+		return conn, nil
+	}
+}
+
 // newNoProxyClient returns an http.Client that explicitly bypasses any
 // environment-configured proxy (ALL_PROXY / HTTP_PROXY / HTTPS_PROXY).
 // The Chaturbate DVR proxy setting is only meant for Chaturbate requests;
@@ -28,15 +51,11 @@ func newNoProxyClient(timeout time.Duration) *http.Client {
 		Timeout: timeout,
 		Transport: &http.Transport{
 			Proxy: nil, // never use environment proxy
-			DialContext: (&net.Dialer{
-				Timeout:   30 * time.Second,
-				KeepAlive: 30 * time.Second,
-			}).DialContext,
-			MaxIdleConns:          100,
-			MaxIdleConnsPerHost:   10,
-			IdleConnTimeout:       90 * time.Second,
-			TLSHandshakeTimeout:   15 * time.Second,
-			ExpectContinueTimeout: 1 * time.Second,
+			DialContext:         dialWithTuning(30 * time.Second),
+			MaxIdleConns:        200,
+			MaxIdleConnsPerHost: 50,
+			IdleConnTimeout:     120 * time.Second,
+			TLSHandshakeTimeout: 15 * time.Second,
 		},
 	}
 }
@@ -55,12 +74,12 @@ func newNoProxyClient(timeout time.Duration) *http.Client {
 // a hard 30s deadline on every dial attempt.
 func newDefaultClient(timeout time.Duration) *http.Client {
 	transport := &http.Transport{
-		MaxIdleConns:          100,
-		MaxIdleConnsPerHost:   10,
-		IdleConnTimeout:       90 * time.Second,
+		MaxIdleConns:          200,
+		MaxIdleConnsPerHost:   50,
+		IdleConnTimeout:       120 * time.Second,
 		TLSHandshakeTimeout:   15 * time.Second,
 		ResponseHeaderTimeout: 30 * time.Second,
-		ExpectContinueTimeout: 1 * time.Second,
+		DialContext:           dialWithTuning(30 * time.Second),
 	}
 
 	if proxyEnv := os.Getenv("ALL_PROXY"); proxyEnv != "" {
@@ -78,13 +97,26 @@ func newDefaultClient(timeout time.Duration) *http.Client {
 						conn, err := ctxDialer.DialContext(dialCtx, network, addr)
 						if err != nil {
 							errStr := err.Error()
-							// Proxy-specific failures — try direct instead
 							if strings.Contains(errStr, "host unreachable") ||
 								strings.Contains(errStr, "connection refused") ||
 								strings.Contains(errStr, "general SOCKS server failure") {
-								return directDialer.DialContext(ctx, network, addr)
+								direct, directErr := directDialer.DialContext(ctx, network, addr)
+								if directErr != nil {
+									return nil, err
+								}
+								if tcp, ok := direct.(*net.TCPConn); ok {
+									tcp.SetNoDelay(true)
+									tcp.SetWriteBuffer(262144)
+									tcp.SetReadBuffer(262144)
+								}
+								return direct, nil
 							}
 							return nil, err
+						}
+						if tcp, ok := conn.(*net.TCPConn); ok {
+							tcp.SetNoDelay(true)
+							tcp.SetWriteBuffer(262144)
+							tcp.SetReadBuffer(262144)
 						}
 						return conn, nil
 					}
@@ -142,9 +174,11 @@ func multipartStreamWithProgress(fields map[string]string, fileField, filePath, 
 		return nil, 0, "", nil, fmt.Errorf("open: %w", err)
 	}
 
-	var fileReader io.Reader = file
+	// Buffered reader with 512KB buffer for fewer syscalls during upload
+	bufFile := bufio.NewReaderSize(file, 512*1024)
+	var fileReader io.Reader = bufFile
 	if host != "" {
-		fileReader = NewProgressReaderWithCallback(file, fi.Size(), host, progress)
+		fileReader = NewProgressReaderWithCallback(bufFile, fi.Size(), host, progress)
 	}
 
 	body := io.MultiReader(&preamble, fileReader, bytes.NewReader([]byte(closing)))

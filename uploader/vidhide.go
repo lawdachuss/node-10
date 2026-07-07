@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -22,15 +21,7 @@ type VidHideUploader struct {
 func NewVidHideUploader(apiKeys []string) *VidHideUploader {
 	return &VidHideUploader{
 		keys:   newKeyRing(apiKeys),
-		client: &http.Client{
-			Timeout: 120 * time.Minute,
-			Transport: &http.Transport{
-				MaxIdleConns:        100,
-				MaxIdleConnsPerHost: 100,
-				IdleConnTimeout:     90 * time.Second,
-				DialContext:         (&net.Dialer{Timeout: 30 * time.Second}).DialContext,
-			},
-		},
+		client: newDefaultClient(120 * time.Minute),
 	}
 }
 

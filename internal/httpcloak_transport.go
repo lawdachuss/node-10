@@ -184,36 +184,54 @@ func (t *httpcloakTransport) rotateProxy() bool {
 func (t *httpcloakTransport) refreshProxies() bool {
 	t.mu.Lock()
 
-	// Try configured proxies first — cookies were extracted through them,
-	// so the IP/region must match or Cloudflare rejects the requests.
+	// All current proxies failed — collect env-configured ones first, then
+	// also attempt dynamic discovery as a fallback so dead secrets don't
+	// prevent the DVR from finding working proxies.
 	newProxies := configuredProxyURLs()
 	if len(newProxies) > 0 {
-		fmt.Printf("[proxy] using %d env-configured proxies\n", len(newProxies))
+		fmt.Printf("[proxy] %d env-configured proxies present (may be stale) — also attempting dynamic discovery...\n", len(newProxies))
 	} else {
-		// No configured proxies — try dynamic discovery as a last resort.
 		fmt.Println("[proxy] no env-configured proxies — attempting dynamic discovery...")
-		proxy.ResetCache()
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		defer cancel()
-		results, err := proxy.FetchProxies(ctx, 5)
-		if err == nil {
-			for _, r := range results {
-				if r.OK {
-					newProxies = append(newProxies, r.URL)
-				}
+	}
+
+	// Always try dynamic discovery when we're in a refresh cycle
+	// (all previous proxies failed). Release the lock while fetching.
+	t.mu.Unlock()
+	proxy.ResetCache()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	results, err := proxy.FetchProxies(ctx, 5)
+	t.mu.Lock()
+
+	if err == nil {
+		for _, r := range results {
+			if r.OK {
+				newProxies = append(newProxies, r.URL)
 			}
-			fmt.Printf("[proxy] dynamically discovered %d proxies\n", len(newProxies))
 		}
-		if len(newProxies) == 0 {
-			t.mu.Unlock()
-			if err != nil {
-				fmt.Printf("[proxy] dynamic discovery failed: %v\n", err)
-			} else {
-				fmt.Println("[proxy] dynamic discovery returned no working proxies")
-			}
-			return false
+		fmt.Printf("[proxy] dynamically discovered %d working proxies\n", len(results))
+	} else {
+		fmt.Printf("[proxy] dynamic discovery failed: %v\n", err)
+	}
+
+	if len(newProxies) == 0 {
+		t.mu.Unlock()
+		fmt.Println("[proxy] no proxies available from env or discovery")
+		return false
+	}
+
+	// Deduplicate while preserving order (env proxies first, discovered after)
+	seen := make(map[string]bool)
+	deduped := make([]string, 0, len(newProxies))
+	for _, p := range newProxies {
+		if !seen[p] {
+			seen[p] = true
+			deduped = append(deduped, p)
 		}
 	}
+	newProxies = deduped
+
+	fmt.Printf("[proxy] total proxy pool: %d URLs\n", len(newProxies))
 
 	// Close old client if it exposes a Close method
 	if c, ok := interface{}(t.client).(interface{ Close() error }); ok {

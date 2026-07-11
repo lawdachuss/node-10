@@ -212,14 +212,17 @@ jobs:
             if ($sa) { $env:ALL_PROXY = $sa; $env:all_proxy = $sa }
           } -ArgumentList $repoDir
 
-          # ========== JOB: Scrapling Install (cached) ==========
+          # ========== JOB: Python Deps Install (cached) ==========
           $scrapleJob = Start-Job -Name scrapling -ScriptBlock {
             $sa = $env:ALL_PROXY; Remove-Item Env:ALL_PROXY,Env:all_proxy,Env:HTTP_PROXY,Env:HTTPS_PROXY,Env:http_proxy,Env:https_proxy -ErrorAction SilentlyContinue
-            Write-Host "[SCRAPLING] Installing..."
+            Write-Host "[PYTHON] Installing scrapling..."
             $t1 = Measure-Command { pip install "scrapling[fetchers]" 2>&1 | Out-Null }
-            Write-Host "[SCRAPLING] pip install: $([math]::Round($t1.TotalSeconds,1))s"
+            Write-Host "[PYTHON] scrapling: $([math]::Round($t1.TotalSeconds,1))s"
+            Write-Host "[PYTHON] Installing playwright chromium..."
             $t2 = Measure-Command { python -m playwright install chromium 2>&1 | Out-Null }
-            Write-Host "[SCRAPLING] playwright chromium: $([math]::Round($t2.TotalSeconds,1))s"
+            Write-Host "[PYTHON] playwright: $([math]::Round($t2.TotalSeconds,1))s"
+            Write-Host "[PYTHON] Installing pysocks..."
+            pip install pysocks 2>&1 | Out-Null
             if ($sa) { $env:ALL_PROXY = $sa; $env:all_proxy = $sa }
           }
 
@@ -254,8 +257,9 @@ jobs:
           Write-Host "[MAIN] Waiting for proxy discovery..."; $null = [System.Console]::Out.Flush()
           $null = $proxyJob | Wait-Job -Timeout 60
           if ($proxyJob.State -eq 'Running') { Write-Warning "[PROXY] Timeout, continuing with fallback" }
-          $proxyResult = Receive-Job $proxyJob -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  [PROXY] $_"; $_ }
+          Receive-Job $proxyJob -ErrorAction SilentlyContinue | Out-Null
           Remove-Job $proxyJob -Force -ErrorAction SilentlyContinue
+          $proxyResult = if (Test-Path $proxyFile) { Get-Content $proxyFile -Raw } else { $null }
           if ($proxyResult -and ($proxyResult -match '^(.+?)\|(.+)$')) {
             $proxyList = $matches[1]; $primary = $matches[2]
             echo "PROXY_URL=$proxyList" >> $env:GITHUB_ENV
@@ -275,20 +279,13 @@ jobs:
           if (-not (Test-Path "$repoDir\chaturbate-dvr.exe")) { Write-Error "[FATAL] DVR binary not built"; exit 1 }
           Write-Host "[OK] chaturbate-dvr.exe: $((Get-Item "$repoDir\chaturbate-dvr.exe").Length / 1MB) MB"
 
-          # ========== .env + setup.bat + grab_cookies ==========
-          Write-Host "[MAIN] Writing .env + running setup + grab_cookies..."
+          # ========== .env + grab_cookies ==========
+          Write-Host "[MAIN] Writing .env + running grab_cookies..."
           Set-Location $repoDir
           if (-not [string]::IsNullOrWhiteSpace($env:MINI_ENV)) {
             [System.IO.File]::WriteAllText("$repoDir\.env", $env:MINI_ENV, (New-Object System.Text.UTF8Encoding($false)))
             Write-Host "[.env] Written from secret ($($env:MINI_ENV.Length) chars)"
           } else { Write-Warning "[.env] MINI_ENV secret is empty" }
-          $env:NO_PROXY = "pypi.org,files.pythonhosted.org,*.pythonhosted.org"
-          if (Test-Path ".\setup.bat") {
-            Write-Host "[SETUP] Running setup.bat -NoAppStart..."
-            $st = Measure-Command { cmd /c ".\setup.bat -NoAppStart" 2>&1 | Out-Null }
-            Write-Host "[SETUP] Done in $([math]::Round($st.TotalSeconds,1))s"
-          } else { Write-Host "[SETUP] No setup.bat found" }
-          Remove-Item Env:NO_PROXY -ErrorAction SilentlyContinue
           if (Test-Path ".\grab-cookies.exe") {
             Write-Host "[GRABBER] Running cookie grabber..."
             $gt = Measure-Command { .\grab-cookies.exe 2>&1 | Out-Null }

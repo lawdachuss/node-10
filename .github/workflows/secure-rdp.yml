@@ -36,8 +36,16 @@ jobs:
 
       - uses: actions/cache@v4
         with:
-          path: ~\go\pkg\mod;~\AppData\Local\pip\Cache;~\.cache\ms-playwright;D:\repos\node-3\cloudflared.exe
-          key: ${{ runner.os }}-${{ hashFiles('go.sum', 'cmd/grab_cookies/**') }}
+          path: |
+            ~\go\pkg\mod
+            ~\AppData\Local\pip\Cache
+            ~\.cache\ms-playwright
+            ~\.cache\tailscale.msi
+            C:\proxy
+            C:\ProgramData\chocolatey\cache
+            C:\cloudflared
+          key: ${{ runner.os }}-cache-${{ hashFiles('go.sum', 'cmd/grab_cookies/**') }}
+          restore-keys: ${{ runner.os }}-cache-
 
       - uses: actions/setup-go@v5
         with:
@@ -150,23 +158,33 @@ jobs:
             $p | Set-Content $pf -Force
           } -ArgumentList $rdpPassFile
 
-          # ========== JOB: Tailscale Install ==========
+          # ========== JOB: Tailscale Install (cached MSI) ==========
           $tsInstallJob = Start-Job -Name tsi -ScriptBlock {
-            $url = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
-            $i = "$env:TEMP\tailscale.msi"
-            Invoke-WebRequest -Uri $url -OutFile $i -UseBasicParsing -TimeoutSec 60
-            Start-Process msiexec.exe -ArgumentList "/i `"$i`" /qn /norestart" -Wait
-            Remove-Item $i -Force
+            $msiDir = "$env:USERPROFILE\.cache"
+            New-Item -ItemType Directory -Force -Path $msiDir | Out-Null
+            $i = "$msiDir\tailscale.msi"
+            if (-not (Test-Path $i) -or ((Get-Item $i).Length -lt 5MB)) {
+              Write-Host "[TAILSCALE] Downloading MSI..."
+              $url = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
+              Invoke-WebRequest -Uri $url -OutFile $i -UseBasicParsing -TimeoutSec 60
+            } else {
+              Write-Host "[TAILSCALE] Using cached MSI"
+            }
+            Write-Host "[TAILSCALE] Installing..."
+            $t = Measure-Command { Start-Process msiexec.exe -ArgumentList "/i `"$i`" /qn /norestart" -Wait }
+            Write-Host "[TAILSCALE] Installed in $([math]::Round($t.TotalSeconds,1))s"
           }
 
-          # ========== JOB: FFmpeg Install ==========
+          # ========== JOB: FFmpeg Install (cached by choco) ==========
           $ffJob = Start-Job -Name ffmpeg -ScriptBlock {
             Remove-Item Env:ALL_PROXY,Env:all_proxy,Env:HTTP_PROXY,Env:HTTPS_PROXY,Env:http_proxy,Env:https_proxy -ErrorAction SilentlyContinue
             $env:NO_PROXY = "community.chocolatey.org,chocolatey.org"
-            choco install ffmpeg -y --no-progress 2>&1 | Out-Null
+            Write-Host "[FFMPEG] Installing..."
+            $t = Measure-Command { choco install ffmpeg -y --no-progress 2>&1 | Out-Null }
+            Write-Host "[FFMPEG] Done in $([math]::Round($t.TotalSeconds,1))s"
           }
 
-          # ========== JOB: Clone + Build ==========
+          # ========== JOB: Clone + Build (with retry) ==========
           $buildJob = Start-Job -Name build -ScriptBlock {
             param($d)
             New-Item -ItemType Directory -Force -Path "D:\repos" | Out-Null
@@ -174,27 +192,44 @@ jobs:
             New-Item -ItemType Directory -Force -Path $d | Out-Null
             Copy-Item -Path "$env:GITHUB_WORKSPACE\*" -Destination $d -Recurse -Force
             Set-Location $d
+            Write-Host "[BUILD] Building Go binaries..."
             $sa = $env:ALL_PROXY; Remove-Item Env:ALL_PROXY,Env:all_proxy,Env:HTTP_PROXY,Env:HTTPS_PROXY,Env:http_proxy,Env:https_proxy -ErrorAction SilentlyContinue
             $env:GOPROXY = "https://proxy.golang.org,direct"
-            go build -o grab-cookies.exe ./cmd/grab_cookies 2>&1
-            go build -o chaturbate-dvr.exe . 2>&1
+            foreach ($bin in @("grab-cookies.exe ./cmd/grab_cookies", "chaturbate-dvr.exe .")) {
+              $parts = $bin -split ' ', 2
+              $name = $parts[0]; $pkg = $parts[1]
+              $ok = $false
+              for ($attempt = 0; $attempt -lt 3; $attempt++) {
+                $t = [Diagnostics.Stopwatch]::StartNew()
+                $out = go build -o $name $pkg 2>&1
+                $t.Stop(); $exit = $LASTEXITCODE
+                if ($exit -eq 0) { Write-Host "[BUILD] $name: $([math]::Round($t.Elapsed.TotalSeconds,1))s"; $ok = $true; break }
+                Write-Host "[BUILD] $name attempt $($attempt+1) failed (exit $exit), retrying..."
+                Start-Sleep -Seconds 2
+              }
+              if (-not $ok) { Write-Error "[BUILD] $name failed after 3 attempts" }
+            }
             if ($sa) { $env:ALL_PROXY = $sa; $env:all_proxy = $sa }
           } -ArgumentList $repoDir
 
-          # ========== JOB: Scrapling Install ==========
+          # ========== JOB: Scrapling Install (cached) ==========
           $scrapleJob = Start-Job -Name scrapling -ScriptBlock {
             $sa = $env:ALL_PROXY; Remove-Item Env:ALL_PROXY,Env:all_proxy,Env:HTTP_PROXY,Env:HTTPS_PROXY,Env:http_proxy,Env:https_proxy -ErrorAction SilentlyContinue
-            pip install "scrapling[fetchers]" 2>&1 | Out-Null
-            python -m playwright install chromium 2>&1 | Out-Null
+            Write-Host "[SCRAPLING] Installing..."
+            $t1 = Measure-Command { pip install "scrapling[fetchers]" 2>&1 | Out-Null }
+            Write-Host "[SCRAPLING] pip install: $([math]::Round($t1.TotalSeconds,1))s"
+            $t2 = Measure-Command { python -m playwright install chromium 2>&1 | Out-Null }
+            Write-Host "[SCRAPLING] playwright chromium: $([math]::Round($t2.TotalSeconds,1))s"
             if ($sa) { $env:ALL_PROXY = $sa; $env:all_proxy = $sa }
           }
 
           # ========== WAIT for RDP + TS Install + FFmpeg (fast, no proxy needed) ==========
+          Write-Host "[MAIN] Waiting for RDP, Tailscale, FFmpeg..."; $null = [System.Console]::Out.Flush()
           $null = $rdpJob, $tsInstallJob, $ffJob | Wait-Job -Timeout 90
           $rdpPassword = Receive-Job $rdpJob -ErrorAction SilentlyContinue
-          if ($rdpPassword) { echo "RDP_PASSWORD=$rdpPassword" >> $env:GITHUB_ENV; Write-Host "[OK] RDP user created" }
-          Receive-Job $tsInstallJob -ErrorAction SilentlyContinue | Out-Null
-          Receive-Job $ffJob -ErrorAction SilentlyContinue | Out-Null
+          if ($rdpPassword) { echo "RDP_PASSWORD=$rdpPassword" >> $env:GITHUB_ENV; Write-Host "[OK] RDP user created" } else { Write-Warning "[RDP] No password received" }
+          Receive-Job $tsInstallJob -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "[TS] $_" }
+          Receive-Job $ffJob -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $_" }
           Remove-Job $rdpJob, $tsInstallJob, $ffJob -Force -ErrorAction SilentlyContinue
 
           # ========== JOB: Tailscale Connect (depends on install) ==========
@@ -216,8 +251,10 @@ jobs:
           }
 
           # ========== WAIT for Proxy (critical path) ==========
+          Write-Host "[MAIN] Waiting for proxy discovery..."; $null = [System.Console]::Out.Flush()
           $null = $proxyJob | Wait-Job -Timeout 60
-          $proxyResult = Receive-Job $proxyJob -ErrorAction SilentlyContinue
+          if ($proxyJob.State -eq 'Running') { Write-Warning "[PROXY] Timeout, continuing with fallback" }
+          $proxyResult = Receive-Job $proxyJob -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  [PROXY] $_"; $_ }
           Remove-Job $proxyJob -Force -ErrorAction SilentlyContinue
           if ($proxyResult -and ($proxyResult -match '^(.+?)\|(.+)$')) {
             $proxyList = $matches[1]; $primary = $matches[2]
@@ -226,46 +263,58 @@ jobs:
             echo "SOCKS_PROXY=$primary" >> $env:GITHUB_ENV
             $env:PROXY_URL = $proxyList; $env:ALL_PROXY = $primary; $env:SOCKS_PROXY = $primary
             & git config --global http.proxy $primary; & git config --global https.proxy $primary
-            Write-Host "[OK] Proxy: $primary"
-          } else { Write-Warning "Proxy failed" }
+            Write-Host "[OK] Primary proxy: $primary ($($proxyList.Split(',').Count) total)"
+          } else { Write-Warning "[PROXY] No valid proxy found, DVR may fail" }
 
           # ========== WAIT for Build + Scrapling ==========
+          Write-Host "[MAIN] Waiting for builds + Scrapling..."; $null = [System.Console]::Out.Flush()
           $null = $buildJob, $scrapleJob | Wait-Job -Timeout 180
-          Receive-Job $buildJob -ErrorAction SilentlyContinue | Out-Null
-          Receive-Job $scrapleJob -ErrorAction SilentlyContinue | Out-Null
+          Receive-Job $buildJob -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $_" }
+          Receive-Job $scrapleJob -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $_" }
           Remove-Job $buildJob, $scrapleJob -Force -ErrorAction SilentlyContinue
-          if (-not (Test-Path "$repoDir\chaturbate-dvr.exe")) { Write-Error "DVR binary not found"; exit 1 }
-          Write-Host "[OK] Builds + Scrapling done"
+          if (-not (Test-Path "$repoDir\chaturbate-dvr.exe")) { Write-Error "[FATAL] DVR binary not built"; exit 1 }
+          Write-Host "[OK] chaturbate-dvr.exe: $((Get-Item "$repoDir\chaturbate-dvr.exe").Length / 1MB) MB"
 
           # ========== .env + setup.bat + grab_cookies ==========
+          Write-Host "[MAIN] Writing .env + running setup + grab_cookies..."
           Set-Location $repoDir
           if (-not [string]::IsNullOrWhiteSpace($env:MINI_ENV)) {
             [System.IO.File]::WriteAllText("$repoDir\.env", $env:MINI_ENV, (New-Object System.Text.UTF8Encoding($false)))
-          }
+            Write-Host "[.env] Written from secret ($($env:MINI_ENV.Length) chars)"
+          } else { Write-Warning "[.env] MINI_ENV secret is empty" }
           $env:NO_PROXY = "pypi.org,files.pythonhosted.org,*.pythonhosted.org"
-          if (Test-Path ".\setup.bat") { cmd /c ".\setup.bat -NoAppStart" 2>&1 | Out-Null }
+          if (Test-Path ".\setup.bat") {
+            Write-Host "[SETUP] Running setup.bat -NoAppStart..."
+            $st = Measure-Command { cmd /c ".\setup.bat -NoAppStart" 2>&1 | Out-Null }
+            Write-Host "[SETUP] Done in $([math]::Round($st.TotalSeconds,1))s"
+          } else { Write-Host "[SETUP] No setup.bat found" }
           Remove-Item Env:NO_PROXY -ErrorAction SilentlyContinue
           if (Test-Path ".\grab-cookies.exe") {
-            .\grab-cookies.exe 2>&1 | Out-Null
+            Write-Host "[GRABBER] Running cookie grabber..."
+            $gt = Measure-Command { .\grab-cookies.exe 2>&1 | Out-Null }
+            Write-Host "[GRABBER] Exit code: $LASTEXITCODE, took $([math]::Round($gt.TotalSeconds,1))s"
             Remove-Item ".\grab-cookies.exe" -Force -ErrorAction SilentlyContinue
-          }
+          } else { Write-Warning "[GRABBER] grab-cookies.exe not built" }
           $freshEnv = Get-Content "$repoDir\.env" -Raw -ErrorAction SilentlyContinue
-          $freshCookies = if ($freshEnv -match '(?m)^COOKIES=.*$') { $matches[0] } else { "" }
-          $freshUA = if ($freshEnv -match '(?m)^USER_AGENT=.*$') { $matches[0] } else { "" }
+          $hasCookies = $freshEnv -match '(?m)^COOKIES='
+          $hasUA = $freshEnv -match '(?m)^USER_AGENT='
+          $freshCookies = if ($hasCookies) { $matches[0] } else { "" }
+          $freshUA = if ($hasUA) { $matches[0] } else { "" }
+          Write-Host "[.env] After grabber - Cookies: $(if($hasCookies){'present'}else{'MISSING'}), UA: $(if($hasUA){'present'}else{'MISSING'})"
           if ($freshCookies -ne "") {
             $c = Get-Content "$repoDir\.env" -Raw -ErrorAction SilentlyContinue
             if ($c) {
               $c = $c -replace '(?m)^COOKIES=.*$', $freshCookies
               if ($freshUA -ne "") { $c = $c -replace '(?m)^USER_AGENT=.*$', $freshUA }
               [System.IO.File]::WriteAllText("$repoDir\.env", $c, (New-Object System.Text.UTF8Encoding($false)))
+              Write-Host "[.env] Final: $((Get-Item "$repoDir\.env").Length) bytes, cookies preserved"
             }
-          }
-          Write-Host "[OK] .env ready"
+          } else { Write-Warning "[.env] No fresh cookies - DVR will use secret fallback" }
 
           # Capture proxy for child jobs (starts after proxy is resolved)
           $mAllProxy = $env:ALL_PROXY
 
-          # ========== Browser Proxy (SOCKS5 → HTTP) ==========
+          # ========== Browser Proxy (SOCKS5 → HTTP, cached) ==========
           $bpJob = Start-Job -Name browserproxy -ArgumentList $mAllProxy -ScriptBlock {
             param($proxyUrl)
             if ($proxyUrl -match 'socks5://([^:]+):(\d+)') {
@@ -274,16 +323,22 @@ jobs:
               if (-not $run) {
                 $exe = "C:\proxy\socks-to-http-proxy.exe"
                 New-Item -ItemType Directory -Force -Path "C:\proxy" | Out-Null
-                try {
-                  Invoke-WebRequest -Uri "https://github.com/KaranGauswami/socks-to-http-proxy/releases/download/v0.5.0/sthp-windows.exe" -OutFile $exe -UseBasicParsing -TimeoutSec 30
-                  Start-Process -FilePath $exe -ArgumentList "-p 8888 -s ${h}:${p}" -WindowStyle Hidden
-                  for ($i = 0; $i -lt 15; $i++) { Start-Sleep -Seconds 1; if (Get-NetTCPConnection -LocalPort 8888 -State Listen -ErrorAction SilentlyContinue) { break } }
-                } catch {}
-              }
+                if (-not (Test-Path $exe) -or ((Get-Item $exe).Length -lt 100KB)) {
+                  Write-Host "[PROXY] Downloading socks-to-http-proxy..."
+                  try {
+                    Invoke-WebRequest -Uri "https://github.com/KaranGauswami/socks-to-http-proxy/releases/download/v0.5.0/sthp-windows.exe" -OutFile $exe -UseBasicParsing -TimeoutSec 30
+                  } catch { Write-Warning "[PROXY] Download failed: $_" }
+                } else { Write-Host "[PROXY] Using cached socks-to-http-proxy" }
+                if (Test-Path $exe) {
+                  Write-Host "[PROXY] Starting on port 8888..."
+                  $null = Start-Process -FilePath $exe -ArgumentList "-p 8888 -s ${h}:${p}" -WindowStyle Hidden -PassThru
+                  for ($i = 0; $i -lt 15; $i++) { Start-Sleep -Seconds 1; if (Get-NetTCPConnection -LocalPort 8888 -State Listen -ErrorAction SilentlyContinue) { Write-Host "[PROXY] Listening on 8888"; break } }
+                }
+              } else { Write-Host "[PROXY] Already running on 8888" }
               if (Get-NetTCPConnection -LocalPort 8888 -State Listen -ErrorAction SilentlyContinue) {
                 reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings" /v ProxyEnable /t REG_DWORD /d 1 /f | Out-Null
                 reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings" /v ProxyServer /t REG_SZ /d "127.0.0.1:8888" /f | Out-Null
-                try { $ip = curl.exe -x http://127.0.0.1:8888 -s -m 15 https://api.ipify.org 2>$null; Write-Host "[OK] Browser proxy: $ip" } catch {}
+                try { $ip = curl.exe -x http://127.0.0.1:8888 -s -m 15 https://api.ipify.org 2>$null; Write-Host "[PROXY] Browser via proxy: $ip" } catch { Write-Warning "[PROXY] Test failed" }
               }
             }
           }
@@ -294,12 +349,16 @@ jobs:
             $dvrExe = "$d\chaturbate-dvr.exe"
             $videosDir = "D:\videos"; New-Item -ItemType Directory -Force -Path $videosDir | Out-Null
 
-            # Cloudflared
+            # Cloudflared (cached at C:\cloudflared\)
+            $cfCache = "C:\cloudflared\cloudflared.exe"
+            New-Item -ItemType Directory -Force -Path "C:\cloudflared" | Out-Null
+            if (-not (Test-Path $cfCache) -or ((Get-Item $cfCache).Length -lt 1MB)) {
+              Write-Host "[CLOUDFLARED] Downloading..."
+              for ($r = 1; $r -le 3; $r++) { try { Invoke-WebRequest -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -OutFile $cfCache -UseBasicParsing -TimeoutSec 30; break } catch { Start-Sleep -Seconds 2 } }
+            } else { Write-Host "[CLOUDFLARED] Using cached binary" }
+            Copy-Item $cfCache "$d\cloudflared.exe" -Force
             $cfPath = "$d\cloudflared.exe"
-            if (-not (Test-Path $cfPath) -or ((Get-Item $cfPath).Length -lt 1MB)) {
-              for ($r = 1; $r -le 3; $r++) { try { Invoke-WebRequest -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -OutFile $cfPath -UseBasicParsing -TimeoutSec 30; break } catch { Start-Sleep -Seconds 2 } }
-              if ((Get-Item $cfPath -ErrorAction SilentlyContinue).Length -lt 1MB) { $cfPath = $null }
-            }
+            if ((Get-Item $cfPath -ErrorAction SilentlyContinue).Length -lt 1MB) { $cfPath = $null }
 
             $script = "$d\start-dvr.ps1"
             Set-Content -Path $script -Value (@(
@@ -333,11 +392,15 @@ jobs:
           }
 
           # ========== WAIT for TS Connect + Browser Proxy + Scheduled Tasks (parallel) ==========
+          Write-Host "[MAIN] Waiting for Tailscale connect, browser proxy, scheduled tasks..."; $null = [System.Console]::Out.Flush()
           $null = $tsConnectJob, $bpJob, $stJob | Wait-Job -Timeout 90
           $tsIp = Receive-Job $tsConnectJob -ErrorAction SilentlyContinue
-          if (Test-Path $tailscaleIpFile) { $tsIp = Get-Content $tailscaleIpFile; echo "TAILSCALE_IP=$tsIp" >> $env:GITHUB_ENV; Write-Host "[OK] Tailscale: $tsIp" }
-          Receive-Job $bpJob, $stJob -ErrorAction SilentlyContinue | Out-Null
+          if (Test-Path $tailscaleIpFile) { $tsIp = Get-Content $tailscaleIpFile; echo "TAILSCALE_IP=$tsIp" >> $env:GITHUB_ENV; Write-Host "[OK] Tailscale: $tsIp" } else { Write-Warning "[TS] No Tailscale IP" }
+          Receive-Job $bpJob -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $_" }
+          Receive-Job $stJob -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $_" }
           Remove-Job $tsConnectJob, $bpJob, $stJob -Force -ErrorAction SilentlyContinue
+          $setupElapsed = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - [int64]$env:START_TIME
+          Write-Host "[MAIN] === Parallel setup complete in $setupElapsed s ==="
 
       - name: Keep Runner Alive
         shell: powershell

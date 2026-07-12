@@ -37,7 +37,23 @@ type httpcloakTransport struct {
 	currentProxy     string
 	refreshCancel    context.CancelFunc // cancels any in-flight Scrapling refresh
 	lastRefreshProxy string             // proxy URL for which we have fresh cookies
+
+	// refreshActive / refreshStartedAt / refreshProxy track the in-flight
+	// Scrapling cookie refresh so RoundTrip can wait for it to finish instead
+	// of rotating (which would cancel it and trigger a thrash loop on flaky
+	// proxy pools where rotations happen faster than Scrapling can solve a
+	// Cloudflare challenge).
+	refreshActive    bool
+	refreshStartedAt time.Time
+	refreshProxy     string
 }
+
+// cookieRefreshCooldown is how long RoundTrip will wait for an in-flight
+// Scrapling cookie refresh to finish before giving up and rotating to another
+// proxy. Scrapling needs 30-90s to solve a Cloudflare challenge, so rotating
+// faster than this just cancels every refresh and no proxy ever gets a valid
+// cf_clearance (the "proxy thrash" failure mode).
+const cookieRefreshCooldown = 90 * time.Second
 
 // sharedTransportSingleton is a singleton http.RoundTripper for the shared transport.
 var sharedTransportSingleton http.RoundTripper
@@ -274,6 +290,21 @@ func (t *httpcloakTransport) refreshProxies() bool {
 func (t *httpcloakTransport) refreshCookies(ctx context.Context, proxyURL, reason string) {
 	fmt.Printf("[proxy] refreshing cookies through %s (%s)...\n", maskProxyHost(proxyURL), reason)
 
+	t.mu.Lock()
+	t.refreshActive = true
+	t.refreshStartedAt = time.Now()
+	t.refreshProxy = proxyURL
+	t.mu.Unlock()
+	defer func() {
+		t.mu.Lock()
+		// Only clear if this is still the same refresh (a rotation may have
+		// started another one for a different proxy in the meantime).
+		if t.refreshProxy == proxyURL {
+			t.refreshActive = false
+		}
+		t.mu.Unlock()
+	}()
+
 	if err := UpdateCookiesFromProxyContext(ctx, proxyURL); err != nil {
 		if ctx.Err() != nil {
 			fmt.Printf("[proxy] cookie refresh cancelled for %s (%s)\n", maskProxyHost(proxyURL), reason)
@@ -292,6 +323,41 @@ func (t *httpcloakTransport) refreshCookies(ctx context.Context, proxyURL, reaso
 	t.mu.Unlock()
 
 	fmt.Printf("[proxy] cookies refreshed successfully through %s (%s)\n", maskProxyHost(proxyURL), reason)
+}
+
+// waitForActiveRefresh blocks while a Scrapling cookie refresh for currentProxy
+// is in flight and within the cooldown window. Returns true if cookies for
+// currentProxy are now ready (and the caller should retry the SAME proxy
+// without rotating); false if there is no active refresh or it has overrun the
+// cooldown (and the caller should rotate to a different proxy).
+func (t *httpcloakTransport) waitForActiveRefresh(currentProxy string) bool {
+	t.mu.Lock()
+	active := t.refreshActive && t.refreshProxy == currentProxy
+	started := t.refreshStartedAt
+	t.mu.Unlock()
+	if !active {
+		return false
+	}
+
+	deadline := started.Add(cookieRefreshCooldown)
+	for {
+		t.mu.Lock()
+		active = t.refreshActive && t.refreshProxy == currentProxy
+		ready := t.lastRefreshProxy == currentProxy
+		t.mu.Unlock()
+
+		if !active {
+			// Refresh finished — only worth retrying the same proxy if it
+			// actually produced cookies for this proxy.
+			return ready
+		}
+		if time.Now().After(deadline) {
+			// Gave it the full cooldown and it's still going — give up and
+			// let the caller rotate (which will cancel this refresh).
+			return false
+		}
+		time.Sleep(2 * time.Second)
+	}
 }
 
 // WarmupChaturbate makes an initial request to chaturbate.com to establish
@@ -535,6 +601,16 @@ func (t *httpcloakTransport) RoundTrip(req *http.Request) (*http.Response, error
 
 			// Proxy connection failure — rotate to next proxy in the list
 			if isProxyError(err) {
+				// If a cookie refresh is already in flight for this proxy and
+				// hasn't had time to finish, wait for it instead of rotating.
+				// Rotating now would cancel the Scrapling refresh, and a flaky
+				// proxy pool would then cycle rotations forever without ever
+				// obtaining a valid cf_clearance (the "proxy thrash" loop).
+				if t.waitForActiveRefresh(currentProxy) {
+					fmt.Printf("[proxy] waited for in-flight cookie refresh for %s — retrying same proxy\n",
+						maskProxyHost(currentProxy))
+					continue
+				}
 				if t.rotateProxy() {
 					continue
 				}

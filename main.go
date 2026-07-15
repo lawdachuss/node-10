@@ -394,6 +394,26 @@ func start(c *cli.Context) error {
 		len(server.Config.StreamWishAPIKeys), len(server.Config.VidHideAPIKeys),
 		len(server.Config.UpnshareKeys))
 
+	// ── Startup self-checks: fail LOUD, never silently ───────────────────
+	// These catch the two classes of "works on some nodes, silently degrades on
+	// others" problems at boot instead of mid-recording:
+	//   1. ffmpeg/ffprobe missing -> mux/probe/normalize/thumbnail/preview fail.
+	//   2. channel_logs schema gap (unapplied migrate.sql) -> node_id always
+	//      NULL and the error-log query times out.
+	if err := config.ValidateFFmpeg(); err != nil {
+		fmt.Printf("⚠️  [startup] FFMPEG/FFPROBE CHECK FAILED: %v\n", err)
+		fmt.Println("   Thumbnails, sprite sheets, previews, A/V muxing and duration")
+		fmt.Println("   probing will FAIL. Install ffmpeg/ffprobe (e.g. `winget install ffmpeg`)")
+		fmt.Println("   or set FFMPEG_PATH in .env to a valid binary path.")
+	}
+	if dbClient := server.GetDBClient(); dbClient != nil {
+		if problems := dbClient.CheckChannelLogsSchema(); len(problems) > 0 {
+			for _, p := range problems {
+				fmt.Printf("⚠️  [startup] DATABASE SCHEMA PROBLEM: %s\n", p)
+			}
+		}
+	}
+
 	// Load cookies from Supabase if available (overrides .env)
 	if server.Config.SupabaseURL != "" && server.Config.SupabaseAPIKey != "" {
 		fmt.Println("📦 Loading cookies from Supabase...")

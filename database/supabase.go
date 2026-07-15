@@ -599,6 +599,36 @@ func (c *Client) GetLogs(username string, limit int) ([]ChannelLog, error) {
 	return logs, err
 }
 
+// CheckChannelLogsSchema probes the live schema for the pieces added by
+// database/migrate.sql that the running code depends on. A missing node_id
+// column means every log is persisted with NULL node_id (so per-node debugging
+// and the checknodes breakdown are useless), and a missing log_level index
+// means the error-log query in checknodes full-scans a huge table and times out
+// with HTTP 500. The probe is non-mutating and safe to call at startup; it
+// returns a list of human-readable problems (empty == healthy) so a node can
+// fail LOUD instead of silently logging into a broken table forever.
+func (c *Client) CheckChannelLogsSchema() []string {
+	var problems []string
+
+	// node_id column present? A GET selecting a non-existent column returns
+	// HTTP 400 with PGRST204 ("Could not find the column").
+	resp, err := c.request("GET", "/channel_logs?select=node_id&limit=1", nil)
+	if err != nil {
+		problems = append(problems, "could not probe channel_logs: "+err.Error())
+	} else {
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode == 400 && strings.Contains(string(body), "PGRST204") {
+			problems = append(problems,
+				"channel_logs.node_id column is MISSING — run database/migrate.sql "+
+					"(needs: ALTER TABLE channel_logs ADD COLUMN IF NOT EXISTS node_id TEXT; "+
+					"CREATE INDEX IF NOT EXISTS idx_channel_logs_level ON channel_logs(log_level, created_at DESC))")
+		}
+	}
+
+	return problems
+}
+
 // ============================================================================
 // PREVIEW IMAGES
 // ============================================================================

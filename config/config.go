@@ -188,6 +188,44 @@ func FFprobeCommandContext(ctx context.Context, args ...string) *exec.Cmd {
 	return exec.CommandContext(ctx, ffprobeBin(), args...)
 }
 
+// ValidateFFmpeg confirms that both ffmpeg and ffprobe binaries are present and
+// executable. Plain recording still works without them (the native Go muxer and
+// a duration fallback cover the basics), but muxing, probe/normalise, thumbnail,
+// sprite-sheet and preview generation all shell out to ffmpeg/ffprobe and will
+// fail per-recording if either is missing. We therefore fail LOUD at startup
+// (never silently) so a node missing ffmpeg is caught immediately instead of
+// degrading every recording with confusing "executable file not found" errors.
+func ValidateFFmpeg() error {
+	var missing []string
+	if err := runBinaryVersion(ffmpegBin()); err != nil {
+		missing = append(missing, "ffmpeg -> "+ffmpegBin())
+	}
+	if err := runBinaryVersion(ffprobeBin()); err != nil {
+		missing = append(missing, "ffprobe -> "+ffprobeBin())
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("ffmpeg/ffprobe not found or not executable: %s", strings.Join(missing, ", "))
+	}
+	return nil
+}
+
+// runBinaryVersion runs `<bin> -version` with a short timeout. A missing binary
+// surfaces as an exec error ("executable file not found in %PATH%"), which is
+// exactly the condition we want to catch.
+func runBinaryVersion(bin string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bin, "-version")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return err
+	}
+	if len(out) == 0 {
+		return fmt.Errorf("no output from %s -version", bin)
+	}
+	return nil
+}
+
 // ffmpegAcquireTimeout bounds how long a caller waits for a lightweight ffmpeg
 // slot. The old code blocked forever on the channel send, so a saturated
 // semaphore (e.g. a burst of concurrent preview generations) would hang the

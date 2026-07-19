@@ -286,6 +286,22 @@ func TestSeekStreaming502IsRetryable(t *testing.T) {
 				w.WriteHeader(http.StatusNoContent)
 			}
 
+		case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/api/v1/video/manage"):
+			// After a successful TUS upload, the uploader polls the manage API
+			// to find the uploaded video by filename. Return a matching video
+			// so pollForVideo resolves immediately and the test finishes fast.
+			searchName := r.URL.Query().Get("search")
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(seekStreamingManageListResp{
+				Data: []seekStreamingManageVideo{{
+					ID:       "upload789",
+					Name:     searchName,
+					Poster:   "/posters/test.jpg",
+					Preview:  "/previews/test.gif",
+					AssetURL: "https://assets.seekstreaming.com",
+				}},
+			})
+
 		default:
 			t.Errorf("mock: unexpected request: %s %s", r.Method, r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)

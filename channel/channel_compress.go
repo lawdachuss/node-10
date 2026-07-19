@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -347,6 +348,17 @@ func writeCombinedFragmentedMP4(w io.Writer, videoFile, audioFile *mp4.File, aud
 		return fmt.Errorf("load audio track: %w", err)
 	}
 
+	// Extract audio timescale from the init segment's mdhd box.
+	// Used to convert the A/V offset (seconds) into timescale units
+	// for adjusting each audio fragment's tfdt BaseMediaDecodeTime.
+	var audioTimescale uint32
+	if audioTrack.Mdia != nil && audioTrack.Mdia.Mdhd != nil {
+		audioTimescale = audioTrack.Mdia.Mdhd.Timescale
+	}
+	if audioTimescale == 0 && warn != nil {
+		warn("audio track missing timescale — cannot apply native tfdt offset")
+	}
+
 	// Combine fragments BEFORE reassigning track IDs — GetFullSamples
 	// matches source traf boxes by trex.TrackID, which must still hold
 	// the original value from the source file.
@@ -370,7 +382,7 @@ func writeCombinedFragmentedMP4(w io.Writer, videoFile, audioFile *mp4.File, aud
 		audioFragments = audioFragments[:minCount]
 	}
 
-	segments, err := combineTrackFragments(videoFragments, videoTrex, audioFragments, audioTrex, audioOffsetSeconds)
+	segments, err := combineTrackFragments(videoFragments, videoTrex, audioFragments, audioTrex, audioOffsetSeconds, audioTimescale)
 	if err != nil {
 		return err
 	}
@@ -428,7 +440,7 @@ func sourceTrack(file *mp4.File, handlerType string) (*mp4.TrakBox, *mp4.TrexBox
 	return trak, trex, nil
 }
 
-func combineTrackFragments(videoFragments []*mp4.Fragment, videoTrex *mp4.TrexBox, audioFragments []*mp4.Fragment, audioTrex *mp4.TrexBox, _ float64) ([]*mp4.MediaSegment, error) {
+func combineTrackFragments(videoFragments []*mp4.Fragment, videoTrex *mp4.TrexBox, audioFragments []*mp4.Fragment, audioTrex *mp4.TrexBox, audioOffsetSeconds float64, audioTimescale uint32) ([]*mp4.MediaSegment, error) {
 	maxFragments := len(videoFragments)
 	if len(audioFragments) > maxFragments {
 		maxFragments = len(audioFragments)
@@ -460,6 +472,35 @@ func combineTrackFragments(videoFragments []*mp4.Fragment, videoTrex *mp4.TrexBo
 		if i < len(audioFragments) {
 			if err := appendFragmentSamples(fragment, audioFragments[i], audioTrex, audioTrackID); err != nil {
 				return nil, fmt.Errorf("append audio fragment %d: %w", i, err)
+			}
+		}
+
+		// Apply timestamp offset to audio fragment's tfdt BaseMediaDecodeTime.
+		// When audio starts after video (positive offset), the audio fragments'
+		// base decode times are too high, causing audio to play behind video.
+		// We subtract the offset (in timescale units) so audio begins at the
+		// same presentation time as video.  For negative offsets (audio ahead),
+		// we add the offset to delay audio to match video's timeline.
+		//
+		// Only adjust when both tracks exist in this fragment.  The multi-track
+		// fragment created by CreateMultiTrackFragment places video first
+		// (Trafs[0]) and audio second (Trafs[1]) when both track IDs are given
+		// in [videoTrackID, audioTrackID] order, which is always the case here.
+		if audioOffsetSeconds != 0 && audioTimescale > 0 &&
+			i < len(videoFragments) && i < len(audioFragments) &&
+			len(fragment.Moof.Trafs) > 1 && fragment.Moof.Trafs[1].Tfdt != nil {
+			offsetUnits := uint64(math.Abs(audioOffsetSeconds) * float64(audioTimescale))
+			current := fragment.Moof.Trafs[1].Tfdt.BaseMediaDecodeTime()
+			if audioOffsetSeconds > 0 {
+				// Audio behind video — play audio earlier by subtracting offset.
+				if current > offsetUnits {
+					fragment.Moof.Trafs[1].Tfdt.SetBaseMediaDecodeTime(current - offsetUnits)
+				} else {
+					fragment.Moof.Trafs[1].Tfdt.SetBaseMediaDecodeTime(0)
+				}
+			} else {
+				// Audio ahead of video — play audio later by adding offset.
+				fragment.Moof.Trafs[1].Tfdt.SetBaseMediaDecodeTime(current + offsetUnits)
 			}
 		}
 

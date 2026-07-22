@@ -197,8 +197,8 @@ func fetchAllRecordings() ([]Recording, error) {
 
 func deleteRecordingCompletely(r Recording) error {
 	if r.ID != "" {
-		path := fmt.Sprintf("/upload_links?recording_id=eq.%s", url.QueryEscape(r.ID))
-		resp, err := supabaseRequest("DELETE", path, nil)
+		body := []byte(fmt.Sprintf(`{"p_recording_id":"%s"}`, r.ID))
+		resp, err := supabaseRequest("POST", "/rpc/delete_upload_links", body)
 		if err != nil {
 			return fmt.Errorf("delete upload links: %w", err)
 		}

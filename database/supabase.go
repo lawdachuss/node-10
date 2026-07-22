@@ -406,9 +406,23 @@ func (c *Client) DeleteRecording(filename string) error {
 	return c.delete(fmt.Sprintf("/recordings?filename=eq.%s", url.QueryEscape(filename)))
 }
 
-// DeleteUploadLinksByRecordingID removes all upload links for a recording
+// DeleteUploadLinksByRecordingID removes all upload links for a recording.
+// Uses an RPC function with explicit UUID cast to avoid PG15+ uuid = text error.
 func (c *Client) DeleteUploadLinksByRecordingID(recordingID string) error {
-	return c.delete(fmt.Sprintf("/upload_links?recording_id=eq.%s", url.QueryEscape(recordingID)))
+	body := map[string]interface{}{
+		"p_recording_id": recordingID,
+	}
+	resp, err := c.requestWithRetry("POST", "/rpc/delete_upload_links", body)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+	return nil
 }
 
 // ============================================================================
@@ -465,11 +479,28 @@ func (c *Client) SaveUploadLinks(links []UploadLink) error {
 	return nil
 }
 
-// GetUploadLinks retrieves all upload links for a recording
+// GetUploadLinks retrieves all upload links for a recording.
+// Uses an RPC function with explicit UUID cast to avoid PG15+ uuid = text error.
 func (c *Client) GetUploadLinks(recordingID string) ([]UploadLink, error) {
 	var links []UploadLink
-	err := c.get(fmt.Sprintf("/upload_links?recording_id=eq.%s", url.QueryEscape(recordingID)), &links)
-	return links, err
+	body := map[string]interface{}{
+		"p_recording_id": recordingID,
+	}
+	resp, err := c.requestWithRetry("POST", "/rpc/get_upload_links", body)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&links); err != nil {
+		return nil, fmt.Errorf("decode response: %w", err)
+	}
+	return links, nil
 }
 
 // GetAllUploadLinks retrieves ALL upload links by paginating through the

@@ -93,12 +93,14 @@ func (c *ChannelConfig) Sanitize() {
 // ChannelInfo represents the information about a channel,
 // mostly used for the template rendering.
 type ChannelInfo struct {
-	IsOnline       bool
-	IsConnecting   bool
-	IsPaused       bool
-	IsCompressing  bool
-	RoomStatus     string // public, private, group, away, offline, hidden
-	Username       string
+	IsOnline           bool
+	IsConnecting       bool
+	IsPaused           bool
+	IsCompressing      bool
+	RoomStatus         string // public, private, group, away, offline, hidden
+	OnlineConfidence   int    // 0=confirmed offline ... 4=confirmed online
+	ConsecutiveChecks  int    // consecutive checks returning same online state
+	Username           string
 	Site           string // "chaturbate" or "stripchat"
 	SiteDomain     string // domain for channel link, e.g. "https://chaturbate.com/"
 	LiveThumbURL   string // live-updating thumbnail; empty = use platform default
@@ -225,6 +227,15 @@ type Config struct {
 
 	SessionDuration       string        // recording session length (e.g. "5h20m0s"); empty = disabled (continuous recording)
 	SessionDurationParsed time.Duration // parsed from SessionDuration; 0 = disabled
+
+	// Chaturbate affiliate API for bulk online model detection.
+	// Sign up at https://chaturbate.com/affiliates/ to get your WM code.
+	AffiliateWM string
+
+	// Chaturbate Events API credentials for real-time broadcast events.
+	// Generate a token at https://chaturbate.com/statsapi/authtoken/ with Events API scope.
+	CBUsername string
+	CBApiToken string
 
 	// Distributed shards/nodes configuration
 	NodeID          string // unique node identifier (auto-detected if empty)

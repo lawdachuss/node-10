@@ -49,6 +49,14 @@ type Channel struct {
 
 	stateMu sync.Mutex // protects IsOnline, IsConnecting, RoomStatus, Duration, Filesize
 
+	// OnlineConfidence tracks how sure we are the model is live.
+	OnlineConfidence site.OnlineConfidence
+
+	// ConsecutiveCheckCount tracks consecutive checks returning the same online state.
+	// Used for adaptive polling: the longer a model has been in one state, the more
+	// confident we are and the longer we can wait between checks.
+	ConsecutiveCheckCount int
+
 	// LastError holds the most recent API/recording error message for diagnostic display.
 	// Set by the Monitor retry loop whenever an attempt fails.
 	LastError string
@@ -358,6 +366,8 @@ func (ch *Channel) exportInfo(includeLogs bool) *entity.ChannelInfo {
 	isOnline := ch.IsOnline
 	isConnecting := ch.IsConnecting
 	roomStatus := ch.RoomStatus
+	confidence := ch.OnlineConfidence
+	consecutiveCount := ch.ConsecutiveCheckCount
 	duration := ch.Duration
 	filesize := ch.Filesize
 	currentFilename := ch.CurrentFilename
@@ -405,28 +415,30 @@ func (ch *Channel) exportInfo(includeLogs bool) *entity.ChannelInfo {
 	}
 
 	return &entity.ChannelInfo{
-		IsOnline:       isOnline,
-		IsConnecting:   isConnecting,
-		IsPaused:       ch.Config.IsPaused.Load(),
-		IsCompressing:  atomic.LoadInt32(&ch.CompressingCount) > 0,
-		RoomStatus:     roomStatus,
-		Username:       ch.Config.Username,
-		Site:           siteName,
-		SiteDomain:     siteDomain,
-		LiveThumbURL:   liveThumbURL,
-		MaxDuration:    internal.FormatDuration(float64(ch.Config.MaxDuration * 60)),
-		MaxFilesize:    internal.FormatFilesize(ch.Config.MaxFilesize * 1024 * 1024),
-		StreamedAt:     streamedAt,
-		CreatedAt:      ch.Config.CreatedAt,
-		Duration:       internal.FormatDuration(duration),
-		Filesize:       internal.FormatFilesize(filesize),
-		Filename:       filename,
-		Logs:           logsCopy,
-		GlobalConfig:   server.Config,
-		UploadStatus:   uploadStatus,
-		UploadProgress: uploadProgress,
-		UploadFilename: uploadFilename,
-		LastError:      lastError,
+		IsOnline:           isOnline,
+		IsConnecting:       isConnecting,
+		IsPaused:           ch.Config.IsPaused.Load(),
+		IsCompressing:      atomic.LoadInt32(&ch.CompressingCount) > 0,
+		RoomStatus:         roomStatus,
+		OnlineConfidence:   int(confidence),
+		ConsecutiveChecks:  consecutiveCount,
+		Username:           ch.Config.Username,
+		Site:               siteName,
+		SiteDomain:         siteDomain,
+		LiveThumbURL:       liveThumbURL,
+		MaxDuration:        internal.FormatDuration(float64(ch.Config.MaxDuration * 60)),
+		MaxFilesize:        internal.FormatFilesize(ch.Config.MaxFilesize * 1024 * 1024),
+		StreamedAt:         streamedAt,
+		CreatedAt:          ch.Config.CreatedAt,
+		Duration:           internal.FormatDuration(duration),
+		Filesize:           internal.FormatFilesize(filesize),
+		Filename:           filename,
+		Logs:               logsCopy,
+		GlobalConfig:       server.Config,
+		UploadStatus:       uploadStatus,
+		UploadProgress:     uploadProgress,
+		UploadFilename:     uploadFilename,
+		LastError:          lastError,
 	}
 }
 
@@ -594,6 +606,35 @@ func (ch *Channel) ProcessPending() {
 	ch.UploadWg.Wait()
 }
 
+// adaptivePollInterval returns the wait interval between liveness checks based on
+// the current confidence level. More confident → poll less frequently.
+func (ch *Channel) adaptivePollInterval() time.Duration {
+	ch.stateMu.Lock()
+	confidence := ch.OnlineConfidence
+	isOnline := ch.IsOnline
+	ch.stateMu.Unlock()
+
+	baseMinutes := max(server.Config.Interval, 1)
+
+	switch {
+	case !isOnline && confidence >= site.ConfidenceConfirmedOffline:
+		// Confirmed offline — poll at the configured interval (don't hammer APIs)
+		return time.Duration(baseMinutes) * time.Minute
+	case !isOnline && confidence >= site.ConfidenceProbablyOffline:
+		// Probably offline — poll at 3/4 interval
+		return time.Duration(max(baseMinutes*3/4, 1)) * time.Minute
+	case isOnline && confidence >= site.ConfidenceConfirmedOnline:
+		// Confirmed online — poll at full interval
+		return time.Duration(baseMinutes) * time.Minute
+	case isOnline && confidence >= site.ConfidenceProbablyOnline:
+		// Probably online — poll at 3/4 interval
+		return time.Duration(max(baseMinutes*3/4, 1)) * time.Minute
+	default:
+		// Uncertain — poll more aggressively (every 30s)
+		return 30 * time.Second
+	}
+}
+
 // UpdateOnlineStatus updates the online status of the channel.
 func (ch *Channel) UpdateOnlineStatus(isOnline bool) {
 	ch.stateMu.Lock()
@@ -613,6 +654,77 @@ func (ch *Channel) SetConnecting(connecting bool) {
 	ch.stateMu.Lock()
 	ch.IsConnecting = connecting
 	ch.stateMu.Unlock()
+	ch.Update()
+}
+
+// UpdateConfidence adjusts the OnlineConfidence based on the current room status
+// and increments or resets the consecutive check counter.
+func (ch *Channel) UpdateConfidence(status string) {
+	ch.stateMu.Lock()
+	defer ch.stateMu.Unlock()
+
+	wasOnline := ch.IsOnline
+	nowOnline := site.IsConsideredLive(status)
+
+	ch.RoomStatus = status
+	ch.IsOnline = nowOnline
+	if nowOnline {
+		ch.LastError = ""
+	}
+
+	if wasOnline == nowOnline {
+		if ch.ConsecutiveCheckCount < 1000 {
+			ch.ConsecutiveCheckCount++
+		}
+	} else {
+		ch.ConsecutiveCheckCount = 1
+	}
+
+	// Derive confidence from room status + consecutive checks
+	switch {
+	case !nowOnline && ch.ConsecutiveCheckCount >= 3:
+		ch.OnlineConfidence = site.ConfidenceConfirmedOffline
+	case !nowOnline:
+		ch.OnlineConfidence = site.ConfidenceProbablyOffline
+	case nowOnline && status == site.StatusPublic:
+		if ch.ConsecutiveCheckCount >= 3 {
+			ch.OnlineConfidence = site.ConfidenceConfirmedOnline
+		} else {
+			ch.OnlineConfidence = site.ConfidenceProbablyOnline
+		}
+	default: // private, hidden, geo_blocked
+		ch.OnlineConfidence = site.ConfidenceUncertain
+	}
+	ch.Update()
+}
+
+// UpdateConfidenceFromStream updates confidence after a successful FetchStream.
+// UpdateConfidenceFromStream updates confidence after a successful FetchStream.
+// This is the strongest signal — we confirmed the stream is accessible.
+func (ch *Channel) UpdateConfidenceFromStream(online bool) {
+	ch.stateMu.Lock()
+	defer ch.stateMu.Unlock()
+
+	if online {
+		ch.IsOnline = true
+		ch.IsConnecting = false
+		ch.LastError = ""
+		ch.RoomStatus = site.StatusPublic
+		if ch.ConsecutiveCheckCount < 1000 {
+			ch.ConsecutiveCheckCount++
+		}
+		if ch.ConsecutiveCheckCount >= 3 {
+			ch.OnlineConfidence = site.ConfidenceConfirmedOnline
+		} else {
+			ch.OnlineConfidence = site.ConfidenceProbablyOnline
+		}
+	} else {
+		ch.IsOnline = false
+		ch.IsConnecting = false
+		ch.RoomStatus = site.StatusOffline
+		ch.ConsecutiveCheckCount = 0
+		ch.OnlineConfidence = site.ConfidenceConfirmedOffline
+	}
 	ch.Update()
 }
 
@@ -636,8 +748,6 @@ func (ch *Channel) CheckOnlineWhilePaused(ctx context.Context, startSeq int) {
 	}()
 	siteImpl := resolveSite(ch)
 	req := internal.NewReq()
-	baseIntervalMinutes := max(server.Config.Interval, 15)
-
 	initialDelay := time.Duration(startSeq*5) * time.Second
 	if initialDelay > 0 {
 		timer := time.NewTimer(initialDelay)
@@ -652,7 +762,7 @@ func (ch *Channel) CheckOnlineWhilePaused(ctx context.Context, startSeq int) {
 	}
 
 	for {
-		waitInterval := time.Duration(baseIntervalMinutes) * time.Minute
+		waitInterval := ch.adaptivePollInterval()
 
 		status, err := siteImpl.GetRoomStatus(ctx, req, ch.Config.Username)
 		if err != nil {
@@ -660,19 +770,8 @@ func (ch *Channel) CheckOnlineWhilePaused(ctx context.Context, startSeq int) {
 				return
 			}
 		} else if status != "" {
-			isOnline := status != site.StatusAway && status != site.StatusOffline
-			ch.stateMu.Lock()
-			changed := ch.IsOnline != isOnline || ch.RoomStatus != status || ch.IsConnecting
-			if changed {
-				ch.IsOnline = isOnline
-				ch.IsConnecting = false
-				ch.RoomStatus = status
-			}
-			ch.stateMu.Unlock()
-			if changed {
-				ch.Info("channel status: %s (paused)", status)
-				ch.Update()
-			}
+			ch.UpdateConfidence(status)
+			ch.Info("channel status: %s (paused)", status)
 		}
 
 		timer := time.NewTimer(waitInterval)

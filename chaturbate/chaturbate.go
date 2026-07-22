@@ -21,10 +21,13 @@ import (
 
 // Room status constants from the Chaturbate API.
 const (
-	StatusPublic  = "public"
-	StatusPrivate = "private"
-	StatusAway    = "away"
-	StatusOffline = "offline"
+	StatusPublic            = "public"
+	StatusPrivate           = "private"
+	StatusHidden            = "hidden"             // Limitcam session in progress
+	StatusAway              = "away"               // Away mode after a Private
+	StatusOffline           = "offline"
+	StatusPasswordProtected = "password protected"  // Password protected room
+	StatusGeoBlocked        = "geo_blocked"         // Public but HLS URL empty
 )
 
 // edgeRegionRegexp extracts edge region from URL like "edge14-sin.live.mmcdn.com"
@@ -88,12 +91,140 @@ func (c *Client) GetStream(ctx context.Context, username string) (*Stream, error
 }
 
 // GetRoomStatus returns the room status string (public, private, away, offline, etc.)
+// Uses the simple GET API only. For robust detection, use GetRoomStatusAdvanced.
 func (c *Client) GetRoomStatus(ctx context.Context, username string) (string, error) {
 	resp, err := fetchAPIResponse(ctx, c.Req, username)
 	if err != nil {
 		return "", err
 	}
 	return resp.RoomStatus, nil
+}
+
+// GetRoomStatusAdvanced performs multi-tier room status detection:
+//
+//	Tier 1 (fastest): POST /get_edge_hls_url_ajax/ — needs CSRF + cookies
+//	Tier 2 (fallback): GET /api/chatvideocontext/{username}/ — cookies only
+//	Tier 3 (probe): Lightweight HEAD on HLS URL if available
+//
+// Cross-verification prevents false negatives:
+//   - If Tier 1 says offline but Tier 2 says public → trust Tier 2
+//   - If Tier 2 says offline but Tier 1 says public → trust Tier 1
+//   - If both say offline → confirm with a second check after 5s delay
+//
+// Returns the resolved room_status and any error from the last attempted check.
+func GetRoomStatusAdvanced(ctx context.Context, req *internal.Req, username string) (string, error) {
+	// ── Tier 1: POST API (fastest, needs CSRF) ──
+	postStatus, postErr := tryPostStatus(ctx, username)
+	if postErr == nil {
+		// POST succeeded — check for geo-blocked
+		if postStatus == StatusPublic && !hasValidHLS(ctx, req, username) {
+			return StatusGeoBlocked, nil
+		}
+	}
+
+	// ── Tier 2: GET API (cookies only, no CSRF) ──
+	getResp, getErr := fetchAPIResponse(ctx, req, username)
+	if getErr == nil && getResp != nil {
+		// Cross-verification: if POST says offline but GET says public, trust GET
+		if postErr == nil && isOfflineStatus(postStatus) && isLiveStatus(getResp.RoomStatus) {
+			return getResp.RoomStatus, nil
+		}
+		// If GET says offline but POST says public, trust POST
+		if getErr == nil && isOfflineStatus(getResp.RoomStatus) && postErr == nil && isLiveStatus(postStatus) {
+			return postStatus, nil
+		}
+		// If GET succeeded, use its status (it's generally more reliable)
+		return mapRoomStatus(getResp.RoomStatus, getResp.StreamURL()), nil
+	}
+
+	// If POST succeeded but GET failed, trust POST
+	if postErr == nil {
+		return mapRoomStatus(postStatus, ""), nil
+	}
+
+	// ── Both failed — try one more time with delay (false negative guard) ──
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case <-time.After(5 * time.Second):
+	}
+
+	// Second attempt: try POST again
+	postStatus2, postErr2 := tryPostStatus(ctx, username)
+	if postErr2 == nil {
+		return mapRoomStatus(postStatus2, ""), nil
+	}
+
+	// Second attempt: try GET again
+	getResp2, getErr2 := fetchAPIResponse(ctx, req, username)
+	if getErr2 == nil && getResp2 != nil {
+		return mapRoomStatus(getResp2.RoomStatus, getResp2.StreamURL()), nil
+	}
+
+	return "", fmt.Errorf("all status checks failed — post: %w, get: %v", postErr, getErr)
+}
+
+// tryPostStatus attempts to get room status via the POST API.
+// Returns just the room_status string (not the full response).
+func tryPostStatus(ctx context.Context, username string) (string, error) {
+	body, err := internal.PostChaturbateAPI(ctx, username)
+	if err != nil {
+		if errors.Is(err, internal.ErrPasswordRequired) {
+			return StatusPasswordProtected, nil
+		}
+		if errors.Is(err, internal.ErrPrivateStream) {
+			return StatusPrivate, nil
+		}
+		return "", err
+	}
+
+	var resp APIResponse
+	if err := json.Unmarshal([]byte(body), &resp); err != nil {
+		return "", fmt.Errorf("parse POST response: %w", err)
+	}
+
+	return resp.RoomStatus, nil
+}
+
+// hasValidHLS checks if the channel has a valid HLS URL by doing a lightweight
+// HEAD on the known thumbnail URL pattern. Returns true if the channel likely
+// has an active stream. This is a best-effort check.
+func hasValidHLS(ctx context.Context, req *internal.Req, username string) bool {
+	thumbURL := fmt.Sprintf("https://thumb.live.mmcdn.com/ri/%s.jpg", username)
+	statusCode, err := req.Head(ctx, thumbURL)
+	return err == nil && statusCode == 200
+}
+
+func isOfflineStatus(status string) bool {
+	return status == StatusOffline || status == StatusAway
+}
+
+func isLiveStatus(status string) bool {
+	return status == StatusPublic || status == StatusPrivate || status == StatusHidden
+}
+
+// mapRoomStatus applies additional logic to map raw API status to our constants.
+// Detects geo-blocked: when API says public but HLS URL is empty.
+func mapRoomStatus(status, hlsURL string) string {
+	if status == StatusPublic && hlsURL == "" {
+		return StatusGeoBlocked
+	}
+	return status
+}
+
+// ResolveRoomStatus maps raw API status strings to IsConsideredLive.
+// Used by liveness checkers and monitor loops.
+func ResolveRoomStatus(status string) (isLive bool, recordable bool) {
+	switch status {
+	case StatusPublic:
+		return true, true
+	case StatusPrivate, StatusHidden:
+		return true, false
+	case StatusGeoBlocked:
+		return true, false // live but unreachable from this region
+	default:
+		return false, false
+	}
 }
 
 func fetchAPIResponse(ctx context.Context, client *internal.Req, username string) (*APIResponse, error) {

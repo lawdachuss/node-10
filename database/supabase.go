@@ -424,10 +424,15 @@ type UploadLink struct {
 }
 
 // SaveUploadLink creates or updates an upload link.
-// Uses on_conflict to atomically upsert by (recording_id, host), making
-// repeated calls idempotent and preventing duplicate rows.
+// Uses an RPC function with explicit UUID cast to avoid PG15+ uuid = text error.
+// See upsert_upload_link in migrate.sql.
 func (c *Client) SaveUploadLink(link *UploadLink) error {
-	resp, err := c.requestWithRetry("POST", "/upload_links?on_conflict=recording_id,host", link)
+	body := map[string]interface{}{
+		"p_recording_id": link.RecordingID,
+		"p_host":         link.Host,
+		"p_url":          link.URL,
+	}
+	resp, err := c.requestWithRetry("POST", "/rpc/upsert_upload_link", body)
 	if err != nil {
 		return err
 	}
@@ -441,9 +446,13 @@ func (c *Client) SaveUploadLink(link *UploadLink) error {
 }
 
 // SaveUploadLinks batch-saves all upload links in a single request.
-// Uses on_conflict to upsert by (recording_id, host).
+// Uses an RPC function with explicit UUID cast to avoid PG15+ uuid = text error.
+// See upsert_upload_links in migrate.sql.
 func (c *Client) SaveUploadLinks(links []UploadLink) error {
-	resp, err := c.requestWithRetry("POST", "/upload_links?on_conflict=recording_id,host", links)
+	body := map[string]interface{}{
+		"p_links": links,
+	}
+	resp, err := c.requestWithRetry("POST", "/rpc/upsert_upload_links", body)
 	if err != nil {
 		return err
 	}

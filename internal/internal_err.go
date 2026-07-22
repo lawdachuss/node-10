@@ -3,15 +3,16 @@ package internal
 import "errors"
 
 var (
-	ErrChannelExists   = errors.New("channel exists")
-	ErrChannelNotFound = errors.New("channel not found")
-	ErrAgeVerification = errors.New("age verification required; try with `-cookies` and `-user-agent`")
-	ErrChannelOffline  = errors.New("channel offline")
-	ErrPrivateStream   = errors.New("channel went offline or private")
-	ErrPaused          = errors.New("channel paused")
-	ErrStopped         = errors.New("channel stopped")
-	ErrGeoBlocked      = errors.New("stream not accessible (may be geo-blocked)")
-	ErrNotFound        = errors.New("not found (404)")
+	ErrChannelExists    = errors.New("channel exists")
+	ErrChannelNotFound  = errors.New("channel not found")
+	ErrAgeVerification  = errors.New("age verification required; try with `-cookies` and `-user-agent`")
+	ErrChannelOffline   = errors.New("channel offline")
+	ErrPrivateStream    = errors.New("channel went offline or private")
+	ErrHiddenStream     = errors.New("channel is in a hidden/Limitcam session")
+	ErrPaused           = errors.New("channel paused")
+	ErrStopped          = errors.New("channel stopped")
+	ErrGeoBlocked       = errors.New("stream not accessible (may be geo-blocked)")
+	ErrNotFound         = errors.New("not found (404)")
 	ErrPasswordRequired = errors.New("room requires a password")
 	// ErrStreamStalled is returned when the HLS segment loop makes no forward
 	// progress for several consecutive poll cycles.  This usually means the

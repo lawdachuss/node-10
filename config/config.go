@@ -312,6 +312,9 @@ func New(c *cli.Context) (*entity.Config, error) {
 		SupabaseURL:    c.String("supabase-url"),
 		SupabaseAPIKey: c.String("supabase-api-key"),
 		StripchatPDKey: c.String("stripchat-pdkey"),
+		AffiliateWM:    c.String("affiliate-wm"),
+		CBUsername:     c.String("cb-username"),
+		CBApiToken:     c.String("cb-api-token"),
 	}
 
 	// If user provided a custom ffmpeg path, set it globally

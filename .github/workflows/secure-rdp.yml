@@ -35,8 +35,9 @@ jobs:
           Unregister-ScheduledTask -TaskName "ChaturbateDVR" -Confirm:$false -ErrorAction SilentlyContinue
           Unregister-ScheduledTask -TaskName "CloudflareTunnel" -Confirm:$false -ErrorAction SilentlyContinue
           # Don't delete videos/ - they contain completed recordings
-          Remove-Item "D:\repos\node-3\tunnel-url.txt" -Force -ErrorAction SilentlyContinue
-
+          $repoName = ($env:GITHUB_REPOSITORY -split '/')[-1]
+          echo "REPO_DIR=D:\repos\$repoName" >> $env:GITHUB_ENV
+          Remove-Item "D:\repos\$repoName\tunnel-url.txt" -Force -ErrorAction SilentlyContinue
           $epoch = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
           echo "START_TIME=$epoch" >> $env:GITHUB_ENV
           $r = gh run list --workflow secure-rdp.yml --repo "$env:GITHUB_REPOSITORY" --limit 10 --json databaseId,status,startedAt 2>$null | ConvertFrom-Json
@@ -76,12 +77,13 @@ jobs:
           UPNSHARE_KEY: ${{ secrets.UPNSHARE_KEY }}
           DOODSTREAM_API_KEY: ${{ secrets.DOODSTREAM_API_KEY }}
           VOESX_API_KEY: ${{ secrets.VOESX_API_KEY }}
+          AFFILIATE_WM: ${{ secrets.AFFILIATE_WM }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_API_KEY: ${{ secrets.SUPABASE_API_KEY }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           DATABASE_PASSWORD: ${{ secrets.DATABASE_PASSWORD }}
         run: |
-          $repoDir = "D:\repos\node-3"
+          $repoDir = "$env:REPO_DIR"
           $proxyFile = "$env:TEMP\_proxy"
           $rdpPassFile = "$env:TEMP\_rdppass"
           $tailscaleOk = "$env:TEMP\_ts_ok"
@@ -97,8 +99,9 @@ jobs:
           $mStreamwishKey = $env:STREAMWISH_API_KEY
           $mUpnshareKey = $env:UPNSHARE_KEY
             $mDoodstreamKey = $env:DOODSTREAM_API_KEY
-            $mVoeKey = $env:VOESX_API_KEY
-            $mRunId = $env:GITHUB_RUN_ID
+          $mVoeKey = $env:VOESX_API_KEY
+          $mAffWm = $env:AFFILIATE_WM
+          $mRunId = $env:GITHUB_RUN_ID
 
           # ========== JOB: Proxy Discovery ==========
           $proxyJob = Start-Job -Name proxy -ScriptBlock {
@@ -310,6 +313,12 @@ jobs:
               [System.IO.File]::WriteAllText("$repoDir\.env", $ev, (New-Object System.Text.UTF8Encoding($false)))
               Write-Host "[.env] VOESX_API_KEY set from secret"
             }
+            if (-not [string]::IsNullOrWhiteSpace($env:AFFILIATE_WM)) {
+              $ev = Get-Content "$repoDir\.env" -Raw
+              if ($ev -match '(?m)^AFFILIATE_WM=') { $ev = $ev -replace '(?m)^AFFILIATE_WM=.*$', "AFFILIATE_WM=$env:AFFILIATE_WM" } else { $ev = $ev.TrimEnd("`r","`n") + "`nAFFILIATE_WM=$env:AFFILIATE_WM`n" }
+              [System.IO.File]::WriteAllText("$repoDir\.env", $ev, (New-Object System.Text.UTF8Encoding($false)))
+              Write-Host "[.env] AFFILIATE_WM set from secret"
+            }
           } else { Write-Warning "[.env] MINI_ENV secret is empty" }
           if (Test-Path ".\grab-cookies.exe") {
             Write-Host "[GRABBER] Running cookie grabber..."
@@ -385,8 +394,8 @@ jobs:
           }
 
           # ========== Scheduled Tasks + Cloudflared ==========
-          $stJob = Start-Job -Name tasks -ArgumentList $repoDir, $mAllProxy, $mChannelPool, $mNodeId, $mSessionDur, $mVidhideKey, $mStreamwishKey, $mUpnshareKey, $mDoodstreamKey, $mVoeKey -ScriptBlock {
-            param($d, $pUrl, $cPool, $nId, $sDur, $vKey, $swKey, $uKey, $dKey, $voeKey)
+          $stJob = Start-Job -Name tasks -ArgumentList $repoDir, $mAllProxy, $mChannelPool, $mNodeId,           $mSessionDur, $mVidhideKey, $mStreamwishKey, $mUpnshareKey, $mDoodstreamKey, $mVoeKey, $mAffWm -ScriptBlock {
+            param($d, $pUrl, $cPool, $nId, $sDur, $vKey, $swKey, $uKey, $dKey, $voeKey, $affWm)
             $dvrExe = "$d\chaturbate-dvr.exe"
             $videosDir = "D:\videos"; New-Item -ItemType Directory -Force -Path $videosDir | Out-Null
 
@@ -410,7 +419,7 @@ jobs:
               "`$env:CHANNEL_POOL_MODE = `"$cPool`"", "`$env:NODE_ID = `"$nId`""
               "`$env:SESSION_DURATION = `"$sDur`""
               "`$env:VIDHIDE_API_KEY = `"$vKey`"", "`$env:STREAMWISH_API_KEY = `"$swKey`""
-              "`$env:UPNSHARE_KEY = `"$uKey`"", "`$env:DOODSTREAM_API_KEY = `"$dKey`"", "`$env:VOESX_API_KEY = `"$voeKey`""
+              "`$env:UPNSHARE_KEY = `"$uKey`"", "`$env:DOODSTREAM_API_KEY = `"$dKey`"", "`$env:VOESX_API_KEY = `"$voeKey`"", "`$env:AFFILIATE_WM = `"$affWm`""
               "Remove-Item Env:HTTP_PROXY,Env:HTTPS_PROXY,Env:http_proxy,Env:https_proxy -ErrorAction SilentlyContinue"
               "Set-Location `"$d`"", "& `"$dvrExe`" --no-tunnel --output-dir `"$videosDir`" *>&1 | Tee-Object -FilePath `"$d\dvr-output.log`" -Append"
             ) -join "`r`n") -Force
@@ -453,7 +462,7 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_API_KEY: ${{ secrets.SUPABASE_API_KEY }}
         run: |
-          $repoDir = "D:\repos\node-3"; $dvrExe = "$repoDir\chaturbate-dvr.exe"; $videosDir = "D:\videos"
+          $repoDir = "$env:REPO_DIR"; $dvrExe = "$repoDir\chaturbate-dvr.exe"; $videosDir = "D:\videos"
           $dvrLog = "$repoDir\dvr-output.log"; $tunnelUrlFile = "$repoDir\tunnel-url.txt"; $uploadFlag = "$repoDir\upload-complete.flag"
           $cloudflaredPath = "$repoDir\cloudflared.exe"
           $tsIp = "$env:TAILSCALE_IP"
@@ -485,6 +494,7 @@ jobs:
           $env:VIDHIDE_API_KEY = "${{ secrets.VIDHIDE_API_KEY }}"; $env:STREAMWISH_API_KEY = "${{ secrets.STREAMWISH_API_KEY }}"
           $env:UPNSHARE_KEY = "${{ secrets.UPNSHARE_KEY }}"; $env:DOODSTREAM_API_KEY = "${{ secrets.DOODSTREAM_API_KEY }}"
           $env:VOESX_API_KEY = "${{ secrets.VOESX_API_KEY }}"
+          $env:AFFILIATE_WM = "${{ secrets.AFFILIATE_WM }}"
           $dvr = Start-Process -FilePath $dvrExe -ArgumentList "--no-tunnel --output-dir `"$videosDir`"" -WorkingDirectory $repoDir -NoNewWindow -RedirectStandardOutput $dvrLog -RedirectStandardError "$repoDir\dvr-err.log" -PassThru
           $dvrPid = if ($dvr -and $dvr.Id) { $dvr.Id } else { "?" }
 
@@ -608,14 +618,27 @@ jobs:
           if (Test-Path $uploadFlag) { Remove-Item $uploadFlag -Force }
           gh workflow run secure-rdp.yml --repo $env:GITHUB_REPOSITORY --ref $env:GITHUB_REF_NAME
 
-      - name: Upload Tunnel URL
+      - name: Restore Network for Upload
         if: always()
+        shell: powershell
+        run: |
+          Write-Host "[NET] Restoring Windows Firewall..."
+          Start-Service mpssvc -ErrorAction SilentlyContinue
+          Set-Service mpssvc -StartupType Automatic -ErrorAction SilentlyContinue
+          Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled True -ErrorAction SilentlyContinue
+          Remove-Item Env:ALL_PROXY,Env:all_proxy,Env:HTTP_PROXY,Env:HTTPS_PROXY,Env:http_proxy,Env:https_proxy -ErrorAction SilentlyContinue
+          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+          Write-Host "[NET] Restored"
+
+      - name: Upload Tunnel URL
+        if: always() && !cancelled()
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         env:
           ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: 'true'
         with:
           name: tunnel-url
-          path: D:\repos\node-3\tunnel-url.txt
+          path: ${{ env.REPO_DIR }}\tunnel-url.txt
           if-no-files-found: ignore
 
       - name: Cleanup on Cancel
@@ -627,5 +650,5 @@ jobs:
           Get-Process cloudflared -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
           Unregister-ScheduledTask -TaskName "ChaturbateDVR" -Confirm:$false -ErrorAction SilentlyContinue
           Unregister-ScheduledTask -TaskName "CloudflareTunnel" -Confirm:$false -ErrorAction SilentlyContinue
-          Remove-Item "D:\repos\node-3\tunnel-url.txt" -Force -ErrorAction SilentlyContinue
+          Remove-Item "$env:REPO_DIR\tunnel-url.txt" -Force -ErrorAction SilentlyContinue
           Write-Host "[CLEANUP] Done"

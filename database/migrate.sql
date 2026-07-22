@@ -86,6 +86,7 @@ CREATE TABLE IF NOT EXISTS recordings (
     gender VARCHAR(50),
     thumbnail_url TEXT,
     sprite_url TEXT,
+    sprite_vtt_url TEXT,
     embed_url TEXT,
     preview_url TEXT,
     seekstreaming_poster_url TEXT,
@@ -478,6 +479,41 @@ BEGIN
 END;
 $$;
 
+-- upsert_upload_link: upserts a single upload link with explicit UUID cast.
+-- Accepts recording_id as TEXT and casts it to UUID inside the function,
+-- avoiding PG15+'s removal of implicit uuid = text comparison.
+CREATE OR REPLACE FUNCTION upsert_upload_link(
+  p_recording_id TEXT,
+  p_host TEXT,
+  p_url TEXT,
+  p_instance_id TEXT DEFAULT 'default'
+)
+RETURNS SETOF upload_links
+LANGUAGE plpgsql AS $$
+BEGIN
+  RETURN QUERY
+  INSERT INTO upload_links (recording_id, host, url, instance_id)
+  VALUES (p_recording_id::UUID, p_host, p_url, p_instance_id)
+  ON CONFLICT (recording_id, host) DO UPDATE SET url = EXCLUDED.url, uploaded_at = NOW()
+  RETURNING *;
+END;
+$$;
+
+-- upsert_upload_links: batch upserts multiple upload links with explicit UUID cast.
+-- Accepts a JSONB array of link objects, casts each recording_id to UUID.
+CREATE OR REPLACE FUNCTION upsert_upload_links(p_links JSONB)
+RETURNS SETOF upload_links
+LANGUAGE plpgsql AS $$
+BEGIN
+  RETURN QUERY
+  INSERT INTO upload_links (recording_id, host, url, instance_id)
+  SELECT (elem->>'recording_id')::UUID, elem->>'host', elem->>'url', COALESCE(elem->>'instance_id', 'default')
+  FROM jsonb_array_elements(p_links) AS elem
+  ON CONFLICT (recording_id, host) DO UPDATE SET url = EXCLUDED.url, uploaded_at = NOW()
+  RETURNING *;
+END;
+$$;
+
 -- ============================================================================
 -- PERMISSIONS
 -- ============================================================================
@@ -502,6 +538,8 @@ GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO anon;
 GRANT EXECUTE ON FUNCTION claim_channels(TEXT, INT) TO anon;
 GRANT EXECUTE ON FUNCTION claim_specific_channel(TEXT, TEXT, TEXT) TO anon;
 GRANT EXECUTE ON FUNCTION reassign_channel(TEXT, TEXT, TEXT, TEXT) TO anon;
+GRANT EXECUTE ON FUNCTION upsert_upload_link(TEXT, TEXT, TEXT, TEXT) TO anon;
+GRANT EXECUTE ON FUNCTION upsert_upload_links(JSONB) TO anon;
 
 -- ============================================================================
 -- RETENTION CLEANUP

@@ -28,6 +28,9 @@ type persistedSettings struct {
 	SeekStreamingKey string `json:"seekstreaming_key,omitempty"`
 	UpnshareKeys     string `json:"upnshare_keys,omitempty"`
 	StripchatPDKey   string `json:"stripchat_pdkey,omitempty"`
+	AffiliateWM      string `json:"affiliate_wm,omitempty"`
+	CBUsername       string `json:"cb_username,omitempty"`
+	CBApiToken       string `json:"cb_api_token,omitempty"`
 }
 
 // SaveSettings writes the runtime cookies and user-agent to Supabase.
@@ -47,6 +50,9 @@ func SaveSettings() error {
 		SeekStreamingKey: Config.SeekStreamingKey,
 		UpnshareKeys:     strings.Join(Config.UpnshareKeys, ","),
 		StripchatPDKey:   Config.StripchatPDKey,
+		AffiliateWM:      Config.AffiliateWM,
+		CBUsername:       Config.CBUsername,
+		CBApiToken:       Config.CBApiToken,
 	}
 	ConfigMu.RUnlock()
 
@@ -112,6 +118,15 @@ func LoadSettings() error {
 	}
 	if s.StripchatPDKey != "" {
 		Config.StripchatPDKey = s.StripchatPDKey
+	}
+	if s.AffiliateWM != "" {
+		Config.AffiliateWM = s.AffiliateWM
+	}
+	if s.CBUsername != "" {
+		Config.CBUsername = s.CBUsername
+	}
+	if s.CBApiToken != "" {
+		Config.CBApiToken = s.CBApiToken
 	}
 
 	fmt.Printf("[startup] after LoadSettings: upnshare keys=%q\n", Config.UpnshareKeys)

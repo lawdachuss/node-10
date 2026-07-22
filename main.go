@@ -345,6 +345,24 @@ func main() {
 				EnvVars: []string{"STRIPCHAT_PDKEY"},
 				Value:   "",
 			},
+			&cli.StringFlag{
+				Name:    "affiliate-wm",
+				Usage:   "Chaturbate affiliate WM code for bulk online model detection",
+				EnvVars: []string{"AFFILIATE_WM"},
+				Value:   "",
+			},
+			&cli.StringFlag{
+				Name:    "cb-username",
+				Usage:   "Chaturbate username for Events API (real-time broadcast notifications)",
+				EnvVars: []string{"CB_USERNAME"},
+				Value:   "",
+			},
+			&cli.StringFlag{
+				Name:    "cb-api-token",
+				Usage:   "Chaturbate Events API token (generate at chaturbate.com/statsapi/authtoken/)",
+				EnvVars: []string{"CB_API_TOKEN"},
+				Value:   "",
+			},
 
 			// ── Distributed shards/nodes ────────────────────────────────────
 			&cli.StringFlag{
@@ -624,10 +642,20 @@ func start(c *cli.Context) error {
 	select {}
 }
 
-// liveChecker implements coordinator.LivenessChecker using the site adapters.
+// liveChecker implements coordinator.LivenessChecker using the site adapters
+// and affiliate API for fast offline detection.
 type liveChecker struct{}
 
 func (l *liveChecker) IsLive(ctx context.Context, siteName, username string) bool {
+	// ── Tier 0: Affiliate API (fastest, no cookies, no proxy) ──
+	// This catches 99% of offline models instantly.
+	if server.Config.AffiliateWM != "" {
+		affiliateLive, _, err := internal.CheckAffiliateLive(ctx, server.Config.AffiliateWM, username)
+		if err == nil && affiliateLive {
+			return true
+		}
+	}
+
 	var siteImpl site.Site
 	switch siteName {
 	case "stripchat":
@@ -636,16 +664,46 @@ func (l *liveChecker) IsLive(ctx context.Context, siteName, username string) boo
 		siteImpl = site.NewChaturbateSite()
 	}
 
-	// Use a no-proxy request for liveness checks. The chatvideocontext GET
-	// endpoint does not need the Netherlands SOCKS5 proxy — we're just checking
-	// room status, not fetching HLS streams. Bypassing the proxy means the
-	// liveness check still works when the proxy pool is temporarily empty.
-	status, err := siteImpl.GetRoomStatus(ctx, internal.NewNoProxyReq(), username)
-	if err != nil {
+	// Retry the site adapter status check with backoff for transient errors.
+	for attempt := 0; attempt < 3; attempt++ {
+		// Use a no-proxy request for liveness checks. The chatvideocontext GET
+		// endpoint does not need the Netherlands SOCKS5 proxy — we're just checking
+		// room status, not fetching HLS streams. Bypassing the proxy means the
+		// liveness check still works when the proxy pool is temporarily empty.
+		status, err := siteImpl.GetRoomStatus(ctx, internal.NewNoProxyReq(), username)
+		if err != nil {
+			select {
+			case <-ctx.Done():
+				return false
+			case <-time.After(time.Duration(1<<attempt) * time.Second):
+			}
+			continue
+		}
+
+		// Consider hidden (limitcam) as live — the model is streaming.
+		// Consider geo_blocked as live but unreachable — don't record but don't remove.
+		switch status {
+		case site.StatusPublic, site.StatusPrivate, site.StatusHidden:
+			return true
+		case site.StatusGeoBlocked:
+			// Re-check with a short delay; geo-blocked can be transient.
+			select {
+			case <-ctx.Done():
+				return false
+			case <-time.After(3 * time.Second):
+			}
+			status2, err2 := siteImpl.GetRoomStatus(ctx, internal.NewNoProxyReq(), username)
+			if err2 == nil && status2 == site.StatusPublic {
+				return true
+			}
+			// Still geo-blocked or now offline — treat as live but unreachable
+			return true
+		}
+
 		return false
 	}
 
-	return status == site.StatusPublic || status == site.StatusPrivate
+	return false
 }
 
 func startTunnel(port string) {

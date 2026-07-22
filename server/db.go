@@ -691,8 +691,15 @@ func SaveRecordingBasics(username, filename, timestamp, roomTitle string, tags [
 		Filesize:   filesize,
 		Duration:   duration,
 	}
-	if err := client.SaveRecording(rec); err != nil {
-		return err
+	// Save recording first (try with duration, fall back without if column missing in schema cache)
+	if err := client.SaveRecording(rec); err != nil && strings.Contains(err.Error(), "PGRST204") {
+		fmt.Printf("[WARN] SaveRecordingBasics: duration column missing — saving without duration: %v\n", err)
+		rec.Duration = 0
+		if err := client.SaveRecording(rec); err != nil {
+			return fmt.Errorf("save recording basics (fallback): %w", err)
+		}
+	} else if err != nil {
+		return fmt.Errorf("save recording basics: %w", err)
 	}
 	return nil
 }

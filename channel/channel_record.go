@@ -47,14 +47,8 @@ func (ch *Channel) Monitor(ctx context.Context) {
 			}
 			switch {
 			case errors.Is(err, internal.ErrChannelOffline) || errors.Is(err, internal.ErrPrivateStream) || errors.Is(err, internal.ErrPasswordRequired):
-				ch.stateMu.Lock()
-				ch.IsOnline = false
-				ch.IsConnecting = false
-				ch.LastError = err.Error()
-				roomStatus := ch.RoomStatus
-				ch.stateMu.Unlock()
-				ch.Update()
-				ch.Info("channel is %s, try again in %d min(s) — %s", roomStatus, server.Config.Interval, err.Error())
+				ch.UpdateConfidence(ch.RoomStatus)
+				ch.Info("channel is %s, try again in %d min(s) — %s", ch.RoomStatus, server.Config.Interval, err.Error())
 
 			case errors.Is(err, internal.ErrStreamStalled):
 				ch.SetConnecting(true)

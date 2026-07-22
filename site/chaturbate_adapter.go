@@ -2,14 +2,10 @@ package site
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"time"
 
-	"github.com/avast/retry-go/v4"
 	"github.com/teacat/chaturbate-dvr/chaturbate"
 	"github.com/teacat/chaturbate-dvr/internal"
-	"github.com/teacat/chaturbate-dvr/server"
 )
 
 // ChaturbateSite adapts the chaturbate package to the Site interface.
@@ -41,45 +37,30 @@ func (s *ChaturbateSite) FetchStream(ctx context.Context, req *internal.Req, use
 }
 
 func (s *ChaturbateSite) GetRoomStatus(ctx context.Context, req *internal.Req, username string) (string, error) {
-	apiURL := fmt.Sprintf("%sapi/chatvideocontext/%s/", server.Config.Domain, username)
-
-	// NOTE: No circuit breaker check here. The GET (chatvideocontext) endpoint
-	// only needs cookies (no CSRF). The circuit breaker only gates the POST HLS
-	// endpoint — it must not block liveness checks or recording fallback.
-
-	var body string
-	err := retry.Do(func() error {
-		if err := internal.WaitForChaturbateRateLimit(ctx); err != nil {
-			return err
-		}
-
-		var e error
-		body, e = req.Get(ctx, apiURL)
-		if e != nil {
-			internal.ReportChaturbateFailure()
-			return e
-		}
-		if body == "" {
-			internal.ReportChaturbateFailure()
-			return fmt.Errorf("empty response body")
-		}
-		internal.ReportChaturbateSuccess()
-		return nil
-	},
-		retry.Context(ctx),
-		retry.Attempts(5),
-		retry.Delay(1*time.Second),
-		retry.MaxDelay(10*time.Second),
-		retry.DelayType(retry.BackOffDelay),
-	)
+	// Use the advanced multi-tier detection that handles POST→GET cascade,
+	// cross-verification, geo-blocked detection, and hidden/password states.
+	status, err := chaturbate.GetRoomStatusAdvanced(ctx, req, username)
 	if err != nil {
-		return "", fmt.Errorf("failed to get API response: %w", err)
+		return "", err
 	}
 
-	var resp chaturbate.APIResponse
-	if err := json.Unmarshal([]byte(body), &resp); err != nil {
-		return "", fmt.Errorf("failed to parse API response: %w", err)
+	// Map chaturbate constants to site constants
+	switch status {
+	case chaturbate.StatusPublic:
+		return StatusPublic, nil
+	case chaturbate.StatusPrivate:
+		return StatusPrivate, nil
+	case chaturbate.StatusHidden:
+		return StatusHidden, nil
+	case chaturbate.StatusAway:
+		return StatusAway, nil
+	case chaturbate.StatusOffline:
+		return StatusOffline, nil
+	case chaturbate.StatusPasswordProtected:
+		return StatusPasswordProtected, nil
+	case chaturbate.StatusGeoBlocked:
+		return StatusGeoBlocked, nil
+	default:
+		return status, nil // pass through unknown status directly
 	}
-
-	return resp.RoomStatus, nil
 }

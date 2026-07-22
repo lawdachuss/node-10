@@ -407,22 +407,8 @@ func (c *Client) DeleteRecording(filename string) error {
 }
 
 // DeleteUploadLinksByRecordingID removes all upload links for a recording.
-// Uses an RPC function with explicit UUID cast to avoid PG15+ uuid = text error.
 func (c *Client) DeleteUploadLinksByRecordingID(recordingID string) error {
-	body := map[string]interface{}{
-		"p_recording_id": recordingID,
-	}
-	resp, err := c.requestWithRetry("POST", "/rpc/delete_upload_links", body)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 400 {
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(bodyBytes))
-	}
-	return nil
+	return c.delete(fmt.Sprintf("/upload_links?recording_id=eq.%s", url.QueryEscape(recordingID)))
 }
 
 // ============================================================================
@@ -434,71 +420,83 @@ type UploadLink struct {
 	RecordingID string `json:"recording_id"`
 	Host        string `json:"host"`
 	URL         string `json:"url"`
+	InstanceID  string `json:"instance_id,omitempty"`
 	UploadedAt  string `json:"uploaded_at,omitempty"`
 }
 
 // SaveUploadLink creates or updates an upload link.
-// Uses an RPC function with explicit UUID cast to avoid PG15+ uuid = text error.
-// See upsert_upload_link in migrate.sql.
 func (c *Client) SaveUploadLink(link *UploadLink) error {
-	body := map[string]interface{}{
-		"p_recording_id": link.RecordingID,
-		"p_host":         link.Host,
-		"p_url":          link.URL,
-	}
-	resp, err := c.requestWithRetry("POST", "/rpc/upsert_upload_link", body)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 400 {
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(bodyBytes))
-	}
-	return nil
+	return c.SaveUploadLinks([]UploadLink{*link})
 }
 
-// SaveUploadLinks batch-saves all upload links in a single request.
-// Uses an RPC function with explicit UUID cast to avoid PG15+ uuid = text error.
-// See upsert_upload_links in migrate.sql.
+// SaveUploadLinks batch-saves all upload links using direct PostgREST table upsert.
 func (c *Client) SaveUploadLinks(links []UploadLink) error {
-	body := map[string]interface{}{
-		"p_links": links,
+	if len(links) == 0 {
+		return nil
 	}
-	resp, err := c.requestWithRetry("POST", "/rpc/upsert_upload_links", body)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
 
-	if resp.StatusCode >= 400 {
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(bodyBytes))
+	type row struct {
+		RecordingID string `json:"recording_id"`
+		Host        string `json:"host"`
+		URL         string `json:"url"`
+		InstanceID  string `json:"instance_id"`
 	}
-	return nil
+	rows := make([]row, 0, len(links))
+	for _, l := range links {
+		instanceID := l.InstanceID
+		if instanceID == "" {
+			instanceID = "default"
+		}
+		rows = append(rows, row{
+			RecordingID: l.RecordingID,
+			Host:        l.Host,
+			URL:         l.URL,
+			InstanceID:  instanceID,
+		})
+	}
+
+	jsonData, err := json.Marshal(rows)
+	if err != nil {
+		return fmt.Errorf("marshal upload links: %w", err)
+	}
+
+	const maxRetries = 3
+	var lastErr error
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		req, err := http.NewRequest("POST", c.URL+"/rest/v1/upload_links?on_conflict=recording_id,host", bytes.NewReader(jsonData))
+		if err != nil {
+			return fmt.Errorf("create request: %w", err)
+		}
+		req.Header.Set("apikey", c.APIKey)
+		req.Header.Set("Authorization", "Bearer "+c.APIKey)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Prefer", "resolution=merge-duplicates,return=minimal")
+
+		resp, err := c.client.Do(req)
+		if err != nil {
+			lastErr = err
+			if attempt < maxRetries-1 {
+				time.Sleep(retryBackoff(attempt))
+				continue
+			}
+			return err
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode >= 400 {
+			bodyBytes, _ := io.ReadAll(resp.Body)
+			return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(bodyBytes))
+		}
+		return nil
+	}
+	return fmt.Errorf("max retries exceeded: %w", lastErr)
 }
 
 // GetUploadLinks retrieves all upload links for a recording.
-// Uses an RPC function with explicit UUID cast to avoid PG15+ uuid = text error.
 func (c *Client) GetUploadLinks(recordingID string) ([]UploadLink, error) {
 	var links []UploadLink
-	body := map[string]interface{}{
-		"p_recording_id": recordingID,
-	}
-	resp, err := c.requestWithRetry("POST", "/rpc/get_upload_links", body)
-	if err != nil {
+	if err := c.get(fmt.Sprintf("/upload_links?recording_id=eq.%s", url.QueryEscape(recordingID)), &links); err != nil {
 		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 400 {
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(bodyBytes))
-	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&links); err != nil {
-		return nil, fmt.Errorf("decode response: %w", err)
 	}
 	return links, nil
 }

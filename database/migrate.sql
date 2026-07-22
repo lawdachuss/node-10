@@ -583,7 +583,7 @@ AS $$
       BEGIN
         SELECT r.username INTO v_username
         FROM public.recordings r
-        WHERE r.id = NEW.recording_id;
+        WHERE r.id::text = NEW.recording_id::text;
 
         IF v_username IS NULL THEN
           RETURN NEW;
@@ -609,7 +609,7 @@ AS $$
             SELECT 1 FROM public.user_notifications un
             WHERE un.user_id = rq.user_id
               AND un.type = 'recording_available'
-              AND un.related_id = NEW.recording_id::text
+              AND un.related_id::text = NEW.recording_id::text
           );
 
         RETURN NEW;
@@ -728,9 +728,9 @@ BEGIN
   RETURN QUERY
   INSERT INTO upload_links (recording_id, host, url, instance_id)
   VALUES (p_recording_id::UUID, p_host, p_url, p_instance_id)
-  ON CONFLICT ON CONSTRAINT upload_links_recording_host_unique
-  DO UPDATE SET 
-    url = EXCLUDED.url, 
+  ON CONFLICT (recording_id, host)
+  DO UPDATE SET
+    url = EXCLUDED.url,
     uploaded_at = NOW()
   RETURNING *;
 END;
@@ -753,9 +753,9 @@ BEGIN
   INSERT INTO upload_links (recording_id, host, url, instance_id)
   SELECT recording_id, host, url, instance_id
   FROM link_data
-  ON CONFLICT ON CONSTRAINT upload_links_recording_host_unique
-  DO UPDATE SET 
-    url = EXCLUDED.url, 
+  ON CONFLICT (recording_id, host)
+  DO UPDATE SET
+    url = EXCLUDED.url,
     uploaded_at = NOW()
   RETURNING *;
 END;

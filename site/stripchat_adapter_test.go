@@ -77,3 +77,75 @@ func TestMapGender(t *testing.T) {
 	}
 }
 
+// TestStripchatTags verifies tag extraction from the topic hashtags combined
+// with the v2 profile fields (specifics, interests, activities, enums).
+func TestStripchatTags(t *testing.T) {
+	m := scModelInfo{
+		Specifics:        []string{"Big Tits", "BBC", "Hairy"},
+		Interests:        []string{"Anal", "My Private Shows"},
+		PublicActivities: []string{"doAnal", "doBlowjob", "doSexToys", "doTittyFuck"},
+		Subculture:       "subcultureRomantic",
+		BodyType:         "bodyTypeAverage",
+		Ethnicity:        "ethnicityWhite",
+		HairColor:        "hairColorBlack",
+		EyeColor:         "eyeColorBrown",
+	}
+	got := stripchatTags(m, "#fun night #BigTits")
+
+	want := []string{"fun", "bigtits", "big tits", "bbc", "hairy", "anal", "my private shows", "blowjob", "sex toys", "titty fuck", "romantic", "average", "white", "black", "brown"}
+	if len(got) != len(want) {
+		t.Fatalf("stripchatTags() = %v, want %v", got, want)
+	}
+	for i, w := range want {
+		if got[i] != w {
+			t.Errorf("stripchatTags()[%d] = %q, want %q (full: %v)", i, got[i], w, got)
+		}
+	}
+}
+
+// TestStripchatTagsHumanize verifies the activity slug and enum humanisation.
+func TestStripchatTagsHumanize(t *testing.T) {
+	cases := map[string]string{
+		"doBlowjob":      "blowjob",
+		"doSexToys":      "sex toys",
+		"doDoggyStyle":   "doggy style",
+		"doMasturbation": "masturbation",
+		"subcultureTop":  "top",
+		"ethnicityWhite": "white",
+		"bodyTypeCurvy":  "curvy",
+		"hairColorBlond": "blond",
+		"eyeColorGreen":  "green",
+		"Romantic":       "romantic",
+	}
+	for in, want := range cases {
+		var got string
+		if len(in) > 2 && in[:2] == "do" {
+			got = scActivityTag(in)
+		} else {
+			got = stripchatEnumTag(in)
+		}
+		if got != want {
+			t.Errorf("humanize(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestStripchatTagsDedupe verifies duplicate topic hashtags and profile tags
+// collapse to a single entry.
+func TestStripchatTagsDedupe(t *testing.T) {
+	m := scModelInfo{
+		Specifics: []string{"Anal", "anal"},
+		Ethnicity: "ethnicityBlack",
+	}
+	got := stripchatTags(m, "#anal night")
+	want := []string{"anal", "black"}
+	if len(got) != len(want) {
+		t.Fatalf("stripchatTags() = %v, want %v", got, want)
+	}
+	for i, w := range want {
+		if got[i] != w {
+			t.Errorf("stripchatTags()[%d] = %q, want %q", i, got[i], w)
+		}
+	}
+}
+

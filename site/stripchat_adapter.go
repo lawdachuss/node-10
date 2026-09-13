@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math/big"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -22,21 +23,37 @@ func NewStripchatSite() *StripchatSite {
 	return &StripchatSite{}
 }
 
+// scModelInfo holds the per-model fields extracted from a Stripchat page state
+// or v2 cam API response. The two sources expose the same model object, so a
+// single shared struct is used for both.
+type scModelInfo struct {
+	Username           string   `json:"username"`
+	Status             string   `json:"status"`
+	IsLive             bool     `json:"isLive"`
+	IsOnline           bool     `json:"isOnline"`
+	BroadcastGender    string   `json:"broadcastGender"`
+	Gender             string   `json:"gender"`
+	PreviewUrlThumbBig string   `json:"previewUrlThumbBig"`
+	SnapshotTimestamp  int64    `json:"snapshotTimestamp"`
+	// Tag-bearing profile fields (see stripchatTags). The v2 API exposes all of
+	// these; the legacy SSR page state exposes them on the same model object.
+	Specifics        []string `json:"specifics"`
+	Interests        []string `json:"interests"`
+	PublicActivities []string `json:"publicActivities"`
+	Subculture       string   `json:"subculture"`
+	BodyType         string   `json:"bodyType"`
+	Ethnicity        string   `json:"ethnicity"`
+	HairColor        string   `json:"hairColor"`
+	EyeColor         string   `json:"eyeColor"`
+}
+
 // scPageState holds the model page state needed to build an HLS recording URL.
 // It normalises two data sources:
 //  1. The v2 API: /api/front/v2/models/username/{username}/cam
 //  2. The legacy SSR: window.__PRELOADED_STATE__ embedded in the HTML page.
 type scPageState struct {
 	ViewCamBase struct {
-		Model struct {
-			Username           string `json:"username"`
-			Status             string `json:"status"`
-			IsLive             bool   `json:"isLive"`
-			IsOnline           bool   `json:"isOnline"`
-			BroadcastGender    string `json:"broadcastGender"`
-			PreviewUrlThumbBig string `json:"previewUrlThumbBig"`
-			SnapshotTimestamp  int64  `json:"snapshotTimestamp"`
-		} `json:"model"`
+		Model scModelInfo `json:"model"`
 	} `json:"viewCamBase"`
 	ViewCam struct {
 		StreamName  string            `json:"streamName"`
@@ -50,13 +67,7 @@ type scPageState struct {
 // /api/front/v2/models/username/{username}/cam?uniq={random}
 type scV2CamResponse struct {
 	User struct {
-		User struct {
-			Username string `json:"username"`
-			Status   string `json:"status"`
-			IsLive   bool   `json:"isLive"`
-			IsOnline bool   `json:"isOnline"`
-			Gender   string `json:"gender"`
-		} `json:"user"`
+		User scModelInfo `json:"user"`
 	} `json:"user"`
 	// Cam is json.RawMessage because Stripchat sometimes returns an object and
 	// sometimes an empty array (e.g. "cam": [] for an offline/unavailable model).
@@ -215,11 +226,10 @@ func fetchStripchatV2API(ctx context.Context, req *internal.Req, username string
 
 	// Normalise to scPageState.
 	state := &scPageState{}
-	state.ViewCamBase.Model.Username = resp.User.User.Username
-	state.ViewCamBase.Model.Status = resp.User.User.Status
-	state.ViewCamBase.Model.IsLive = resp.User.User.IsLive
-	state.ViewCamBase.Model.IsOnline = resp.User.User.IsOnline
-	state.ViewCamBase.Model.BroadcastGender = resp.User.User.Gender
+	state.ViewCamBase.Model = resp.User.User
+	if state.ViewCamBase.Model.BroadcastGender == "" {
+		state.ViewCamBase.Model.BroadcastGender = resp.User.User.Gender
+	}
 	state.ViewCamBase.Model.PreviewUrlThumbBig = cam.PreviewURL
 	state.ViewCamBase.Model.SnapshotTimestamp = cam.SnapshotTs
 	state.ViewCam.StreamName = cam.StreamName
@@ -320,6 +330,15 @@ func mapGender(g string) string {
 	}
 }
 
+// scDisplayGender returns the model's broadcast gender, falling back to the
+// plain gender field when broadcastGender is absent.
+func scDisplayGender(m scModelInfo) string {
+	if m.BroadcastGender != "" {
+		return m.BroadcastGender
+	}
+	return m.Gender
+}
+
 // mouflonPDKey returns the manual Stripchat PD key if configured, otherwise
 // "auto" so FetchPlaylist resolves the pkey from the master playlist and
 // extracts/verifies the pdkey automatically.
@@ -328,6 +347,89 @@ func mouflonPDKey() string {
 		return server.Config.StripchatPDKey
 	}
 	return "auto"
+}
+
+// camelSplitRegexp inserts a space before each capital letter that follows a
+// lowercase letter or digit ("sexToys" -> "sex toys").
+var camelSplitRegexp = regexp.MustCompile(`([a-z0-9])([A-Z])`)
+
+// scActivityTag converts a Stripchat public-activity slug (e.g. "doBlowjob",
+// "doSexToys") into a human-readable tag (e.g. "blowjob", "sex toys").
+func scActivityTag(slug string) string {
+	slug = strings.TrimSpace(slug)
+	if slug == "" {
+		return ""
+	}
+	slug = strings.TrimPrefix(slug, "do")
+	slug = camelSplitRegexp.ReplaceAllString(slug, "${1} ${2}")
+	return strings.ToLower(slug)
+}
+
+// scEnumPrefixes are the value prefixes Stripchat uses for profile-selector
+// enums. e.g. "ethnicityWhite", "subcultureRomantic", "bodyTypeAverage",
+// "hairColorBlack", "eyeColorBrown". Stored lowercased for matching.
+var scEnumPrefixes = []string{"subculture", "bodytype", "ethnicity", "haircolor", "eyecolor"}
+
+// stripchatEnumTag converts a Stripchat profile-enum value (e.g.
+// "ethnicityWhite") into a plain tag (e.g. "white"). Values without a known
+// prefix are passed through lowercased.
+func stripchatEnumTag(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return ""
+	}
+	lower := strings.ToLower(v)
+	for _, p := range scEnumPrefixes {
+		if strings.HasPrefix(lower, p) {
+			return strings.ToLower(strings.TrimSpace(v[len(p):]))
+		}
+	}
+	return lower
+}
+
+// stripchatTags builds the tag list for a Stripchat model. Stripchat exposes
+// tags in several places: #hashtags in the room topic, the profile "specifics"
+// picks (its canonical tag vocabulary), free-text interests, public show
+// activities and the profile-selector enums. All tags are lowercased and
+// deduplicated to match the mergeHashtags normalisation used downstream.
+func stripchatTags(m scModelInfo, topic string) []string {
+	seen := make(map[string]struct{})
+	out := make([]string, 0, len(m.Specifics)+len(m.Interests)+len(m.PublicActivities)+8)
+	add := func(tag string) {
+		tag = strings.ToLower(strings.TrimSpace(tag))
+		if tag == "" {
+			return
+		}
+		if _, ok := seen[tag]; ok {
+			return
+		}
+		seen[tag] = struct{}{}
+		out = append(out, tag)
+	}
+
+	for _, word := range strings.Fields(topic) {
+		if strings.HasPrefix(word, "#") {
+			tag := strings.TrimPrefix(word, "#")
+			tag = strings.Trim(tag, ".,!?;:")
+			add(tag)
+		}
+	}
+	for _, s := range m.Specifics {
+		add(s)
+	}
+	for _, s := range m.Interests {
+		add(s)
+	}
+	for _, s := range m.PublicActivities {
+		add(scActivityTag(s))
+	}
+	add(stripchatEnumTag(m.Subculture))
+	add(stripchatEnumTag(m.BodyType))
+	add(stripchatEnumTag(m.Ethnicity))
+	add(stripchatEnumTag(m.HairColor))
+	add(stripchatEnumTag(m.EyeColor))
+
+	return out
 }
 
 func (s *StripchatSite) FetchStream(ctx context.Context, req *internal.Req, username string) (*StreamInfo, error) {
@@ -352,19 +454,9 @@ func (s *StripchatSite) FetchStream(ctx context.Context, req *internal.Req, user
 		}
 	}
 
-	// Parse tags from topic
-	var tags []string
-	if cam.Topic != "" {
-		for _, word := range strings.Fields(cam.Topic) {
-			if strings.HasPrefix(word, "#") {
-				tag := strings.TrimPrefix(word, "#")
-				tag = strings.Trim(tag, ".,!?;:")
-				if tag != "" {
-					tags = append(tags, tag)
-				}
-			}
-		}
-	}
+	// Parse tags from the room topic, profile specifics/interests, activities
+	// and profile-selector enums.
+	tags := stripchatTags(m, cam.Topic)
 
 	// Thumbnail URL with cache-buster
 	thumbURL := m.PreviewUrlThumbBig
@@ -380,7 +472,7 @@ func (s *StripchatSite) FetchStream(ctx context.Context, req *internal.Req, user
 		RoomStatus:   roomStatus,
 		RoomTitle:    cam.Topic,
 		Tags:         tags,
-		Gender:       mapGender(m.BroadcastGender),
+		Gender:       mapGender(scDisplayGender(m)),
 		LiveThumbURL: thumbURL,
 		// Stripchat CDNs require a stripchat.com Referer/Origin for media
 		// requests, and MOUFLON segment decryption needs a pdkey.

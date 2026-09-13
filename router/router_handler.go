@@ -916,6 +916,13 @@ func VideoDetail(c *gin.Context) {
 		}
 	}
 
+	// A Streamtape embed as the page-level <iframe> shows "video not available"
+	// (cookie/referer policies). Its playback goes through the same-origin relay
+	// (hostPlayer.VideoURL), so never surface a Streamtape embed at page level.
+	if isStreamtapeLink(embedURL) {
+		embedURL = ""
+	}
+
 	hostPlayersJSONBytes, _ := json.Marshal(hostPlayers)
 	hostPlayersJSON := template.JS(hostPlayersJSONBytes)
 
@@ -981,6 +988,12 @@ func VideoDetail(c *gin.Context) {
 	})
 }
 
+// isStreamtapeLink reports whether u is a Streamtape share/embed/view link.
+func isStreamtapeLink(u string) bool {
+	u = strings.ToLower(strings.TrimSpace(u))
+	return strings.HasPrefix(u, "https://streamtape.com/") || strings.Contains(u, "streamtape.com/")
+}
+
 func buildHostPlayers(links map[string]string) []hostPlayer {
 	if len(links) == 0 {
 		return nil
@@ -1018,10 +1031,10 @@ func embedURLForHostLink(host, link string) string {
 		}
 	}
 	if strings.Contains(normalizedHost, "streamtape") || strings.Contains(normalizedLink, "streamtape.com/") {
-		if code := extractFileCode(link); code != "" {
-			return "https://streamtape.com/e/" + code + "/"
-		}
-		return link
+		// Streamtape's embed page shows "video not available" from an iframe
+		// (cookie/referer policies), so the embed path is disabled and playback
+		// goes through the same-origin play relay (videoURLForHostLink).
+		return ""
 	}
 	if strings.Contains(normalizedHost, "mixdrop") || strings.Contains(normalizedLink, "mixdrop.") {
 		if code := extractFileCode(link); code != "" {
@@ -1057,7 +1070,10 @@ func videoURLForHostLink(host, link string) string {
 		return link
 	case strings.Contains(normalizedHost, "streamtape") || strings.Contains(normalizedLink, "streamtape.com/"):
 		if code := extractFileCode(link); code != "" {
-			return "https://streamtape.com/e/" + code + "/"
+			// Same-origin relay: the node resolves Streamtape's tokenized CDN
+			// URL and streams it back, so the browser's <video> element never
+			// touches the Streamtape embed (which fails in iframes).
+			return "/api/play/streamtape/" + code
 		}
 		return link
 	case strings.Contains(normalizedHost, "mixdrop") || strings.Contains(normalizedLink, "mixdrop."):

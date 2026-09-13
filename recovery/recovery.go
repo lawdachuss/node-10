@@ -57,12 +57,12 @@ var cloudflareIPs = []string{"104.21.96.46", "172.67.173.3"}
 // embed page. The thumbnail is video-specific (pointing at the CDN path).
 var ogImageRe = regexp.MustCompile(`(?i)<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']`)
 
-// errStreamFileNotFound is returned when Streamtape's dl endpoint reports that
+// ErrStreamFileNotFound is returned when Streamtape's dl endpoint reports that
 // the file has gone / is not downloadable under the configured account. It is a
 // permanent condition — retrying only wastes time — so the download loop treats
 // it as a hard stop (fail fast) rather than re-issuing tickets and range grabs
 // that can never succeed.
-var errStreamFileNotFound = errors.New("streamtape: file not found")
+var ErrStreamFileNotFound = errors.New("streamtape: file not found")
 
 // ExtractStreamtapeCode returns the filecode from a Streamtape embed/share URL,
 // or "" if it cannot be identified. Accepts e/ and v/ style URLs as well as the
@@ -253,7 +253,7 @@ func streamGrab(filecode, dstPath string, start, length int64, login, key string
 		}
 		dlURL, err := freshDLURL(filecode, login, key)
 		if err != nil {
-			if errors.Is(err, errStreamFileNotFound) {
+			if errors.Is(err, ErrStreamFileNotFound) {
 				// Permanent — the file is gone; stop immediately.
 				return err
 			}
@@ -337,6 +337,21 @@ func streamGrabTail(filecode, dstPath string, length int64, login, key string) e
 	return streamGrab(filecode, dstPath, total-length, length, login, key)
 }
 
+// ResolveStreamtapePlayURL resolves the tokenized direct download URL for a
+// Streamtape file code via the dlticket -> (wait) -> dl dance. The router's
+// same-origin play relay uses this so the browser never has to talk to
+// Streamtape's embed page (which fails with "video not available" when third-
+// party cookies are blocked or the origin has no trusted referer).
+func ResolveStreamtapePlayURL(filecode, login, key string) (string, error) {
+	return freshDLURL(filecode, login, key)
+}
+
+// StreamtapeHTTPClient returns a client tuned for Streamtape's Cloudflare edge
+// (hard-coded Anycast IPs, TLS 1.2, no total timeout for long streams).
+func StreamtapeHTTPClient() *http.Client {
+	return newHTTPClient(0)
+}
+
 // freshDLURL performs the dlticket -> (wait) -> dl dance and returns a direct
 // download URL for the filecode. The Cloudflare edge intermittently resets the
 // TLS handshake, so the whole sequence is retried a few times.
@@ -347,7 +362,7 @@ func freshDLURL(filecode, login, key string) (string, error) {
 		if err == nil {
 			return url, nil
 		}
-		if errors.Is(err, errStreamFileNotFound) {
+		if errors.Is(err, ErrStreamFileNotFound) {
 			// Permanent — no point re-issuing tickets.
 			return "", err
 		}
@@ -400,7 +415,7 @@ func oneTicket(filecode, login, key string) (string, error) {
 	}
 	if dr.Status == 404 || strings.Contains(strings.ToLower(string(body)), "file not found") {
 		// Permanent: the file is gone or not under this account. Do not retry.
-		return "", errStreamFileNotFound
+		return "", ErrStreamFileNotFound
 	}
 	if dr.Status != 200 || dr.Result.URL == "" {
 		return "", fmt.Errorf("dl failed: %s", strings.TrimSpace(string(body)))

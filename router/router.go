@@ -104,6 +104,10 @@ func SetupViews(r *gin.Engine) {
 	// Same-origin image proxy for external thumbnail/sprite/preview hosts.
 	r.GET("/api/imgproxy", ServeImageProxy)
 
+	// Same-origin Streamtape play relay (resolves the tokenized CDN URL on the
+	// node and streams it back; the browser's <video> plays it natively).
+	r.GET("/api/play/streamtape/:code", StreamtapePlay)
+
 	// Upload queue API
 	r.GET("/api/uploads", UploadQueue)
 

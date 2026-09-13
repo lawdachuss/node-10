@@ -29,8 +29,8 @@ func TestOneTicketFileNotFoundIsPermanent(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected error, got nil")
 	}
-	if !errors.Is(err, errStreamFileNotFound) {
-		t.Fatalf("expected errStreamFileNotFound, got %v", err)
+	if !errors.Is(err, ErrStreamFileNotFound) {
+		t.Fatalf("expected ErrStreamFileNotFound, got %v", err)
 	}
 	if got := atomic.LoadInt32(&calls); got < 1 {
 		t.Fatalf("expected dlticket/dl server to be hit, got %d calls", got)
@@ -56,8 +56,8 @@ func TestFreshDLURLBailsImmediatelyOnFileNotFound(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected error, got nil")
 	}
-	if !errors.Is(err, errStreamFileNotFound) {
-		t.Fatalf("expected errStreamFileNotFound, got %v", err)
+	if !errors.Is(err, ErrStreamFileNotFound) {
+		t.Fatalf("expected ErrStreamFileNotFound, got %v", err)
 	}
 	// freshDLURL used to loop 4x with a 3s sleep; the permanent-404 path must
 	// not retry, so the whole call should return fast.
